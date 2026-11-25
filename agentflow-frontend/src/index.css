@@ -1,0 +1,49 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-size: 14px;
+  color: #111827;
+  background: #f6f7f9;
+}
+
+html, body, #root { height: 100%; margin: 0; }
+body { overflow: hidden; }
+
+*::-webkit-scrollbar { width: 8px; height: 8px; }
+*::-webkit-scrollbar-thumb { background: #d1d5db; border-radius: 8px; }
+*::-webkit-scrollbar-track { background: transparent; }
+
+@layer components {
+  .card { @apply bg-white border border-line rounded-[10px] shadow-card; }
+  .btn { @apply px-3 py-1.5 rounded-sm border border-line bg-white text-ink text-[13px] hover:border-primary hover:text-primary disabled:opacity-50 disabled:cursor-not-allowed; }
+  .btn-primary { @apply px-3 py-1.5 rounded-sm bg-primary text-white text-[13px] hover:bg-primary-hover disabled:opacity-50; }
+  .chip { @apply inline-flex items-center px-2 py-0.5 rounded-sm text-[12px] bg-slate-100 text-ink-2; }
+  .badge { @apply inline-flex items-center px-2 py-0.5 rounded-sm text-[12px] font-medium; }
+  .badge-blue { @apply bg-info-50 text-info; }
+  .badge-green { @apply bg-ok-50 text-ok; }
+  .badge-orange { @apply bg-warn-50 text-warn; }
+  .badge-red { @apply bg-danger-50 text-danger; }
+  .badge-purple { @apply bg-violet-50 text-violet; }
+  .badge-cyan { @apply bg-cyan-50 text-cyan; }
+  .badge-gray { @apply bg-slate-100 text-ink-2; }
+  .field { @apply w-full border border-line rounded-sm px-2.5 py-1.5 text-[13px] outline-none focus:border-primary; }
+}
+
+/* React Flow 画布与 UI 稿保持一致 */
+.react-flow__node-agent { width: 170px; }
+.react-flow__handle { width: 8px; height: 8px; background: #4f46e5; border: 2px solid #fff; }
+.react-flow__controls-button { border-radius: 6px; }
+.react-flow__attribution { display: none; }
+
+.node-card { @apply border border-line-strong bg-white rounded-sm shadow-card overflow-hidden; }
+.node-card.is-running { @apply border-info ring-2 ring-info-100; }
+.node-card.is-done { @apply border-ok; }
+.node-card.is-error { @apply border-danger; }
+.node-head { @apply flex items-center gap-2 px-2 py-1.5 border-b border-line bg-slate-50; }
+.node-ico { @apply w-5 h-5 rounded flex items-center justify-center text-[11px] text-white; }
+.node-name { @apply text-[12px] font-semibold text-ink; }
+.node-type { @apply text-[10px] text-ink-3 font-mono ml-auto; }
+.node-body { @apply px-2 py-1.5 text-[11px] text-ink-2 font-mono break-all; }
