@@ -273,7 +273,88 @@ Invoke-RestMethod -Uri http://127.0.0.1:8000/api/tools/{id}/test -Method Post -C
 
 ## R4 · LangGraph（B4）
 
-状态：待做。
+状态：**已完成**（图执行器 + 条件边 + 有界循环 + checkpointer 中断续跑，真实网关实测）
+
+### 0. 这轮改了什么
+
+后端：
+- `app/engine/graph_runner.py`（新）：把 DSL 编译成 `StateGraph`。普通边按 DSL 连，`condition` / `loop` 用条件边路由，`human` 停在检查点上等人批；节点包装仍发 R1 那套 `node_started / node_completed / tool_*` 事件，**前端不需要区分谁在跑**。
+- `app/engine/expr.py`（新）：条件表达式求值。`{{var}}` 先替换成 Python 字面量（字符串带引号、数字原样），再过 AST 白名单（只允许比较/布尔/四则/下标），禁函数调用与属性访问；变量缺失、语法错、类型错都给可读文案。
+- `app/engine/executor.py`：`RUNNER=graph|loop|demo`，默认 `graph`；`app/config.py` 同步默认值。
+- `app/nodes/registry.py`：`condition` / `loop` 的 `implemented` 改 true；`InputConfig.default` 改为 `Any`（原来写死 `str`，声明 `type=number` 的入参会校验失败）。
+- `app/services/flow_service.py`：`loop` 必须有 `body` 分支连线；环检测改为「忽略以 loop 节点为终点的回边」，合法循环不再被误判成环。
+- `app/services/llm.py` + `app/engine/loop.py`：支持 `reasoning_content` / `reasoning` 分片（推理模型的思维链单独透出、照样计费）；节点完成事件带 `reasoningChars` / `finishReason`，正文为空时按「思维链吃满预算」或「撞 Max tokens 被截断」给不同 `hint`（附 `emptyAnswer`）。
+- `app/api/nodes.py`：`GET /api/node-types` 增加 `engine` / `engines`。
+
+前端：
+- `utils/flow.ts`：连线标签按 `sourceHandle` 显示（真/假/循环体/退出）。
+- `FlowNodeView`：`loop` 节点变成两个出口锚点 `body`（蓝）/ `done`（绿）。
+- `flowStore.onConnect` 接受 loop 的 `body/done`，新增 `updateEdgeHandle`（改分支归属不用删线重拉）。
+- `ConfigPanel`：`condition` / `loop` 节点新增「分支连线」下拉，缺分支直接标黄提示。
+- `Topbar` / `RunDrawer`：显示当前引擎（LangGraph / 手写 Loop）与本次运行的引擎徽标；输出页对「思维链吃满预算」的空回答显示警告条。
+
+### A. 自动化
+
+```powershell
+cd agentflow-backend
+.venv\Scripts\python.exe -m pytest          # 54 passed（43 + 图执行器 9 + 空回答诊断 2）
+
+cd ..\agentflow-frontend
+node node_modules\typescript\bin\tsc --noEmit   # 无输出
+node node_modules\vite\bin\vite.js build        # ✓ built
+```
+
+| 用例 | 守的是什么 |
+|---|---|
+| `test_graph.py`（9 条） | 图引擎线性流程的 token/usage/engine、**条件只走一条分支**（真/假参数化）、表达式变量缺失的可读报错、循环体按 `max_rounds` 跑满再退出、退出条件为真提前退出、**暂停/续跑**（checkpoint 落库、续跑不重复 `node_started`）、取消后状态不被改写回 succeeded、`node-types` 的 engine 与控制节点 implemented |
+| `test_loop.py` 新增 2 条 | ①只有思维链、正文为空：必须给 `reasoningChars` + `emptyAnswer` + 思维链口径的 `hint`；②`finish_reason="length"` 且正文为空：`finishReason` 要落库、`hint` 要说「撞到 Max tokens 被截断」。两种情况都不能静默吞掉 |
+
+### B. 页面验收（**先看这节：打开哪个页面，验哪些功能**）
+
+库里已备好三条 R4 演示流程（都在真实 DB 里，可直接点运行）：
+
+| 流程 | id | 结构 |
+|---|---|---|
+| R4 分支演示（condition 真/假） | `flow_1c485778` | input(score) → condition(`{{score}} > 0.8`) →（真）prompt_high → llm_high /（假）prompt_low → llm_low → output |
+| R4 循环演示（有界 3 轮） | `flow_43e2f4ba` | input(query) → loop(max_rounds=3) → body: prompt(第 {{loop_round}} 轮) → llm → 回到 loop → done: output |
+| R4 中断续跑演示（human 审批） | `flow_78b1ae68` | input(query) → human → output(approved, query) |
+
+| # | 打开哪个页面 | 做什么 | 期望 | 本轮实测 |
+|---|---|---|---|---|
+| 1 | 任意页看右上角 | 找引擎 chip | 显示「引擎 LangGraph」；`GET /api/node-types` 里 `engine="graph"`、`engines` 含 graph/loop/demo | ✅ |
+| 2 | `http://127.0.0.1:5173/flows/flow_1c485778` | 选中「分支」节点 | 右侧有**两个锚点**（真=绿、假=红）；配置面板出现「分支连线」，两条出边分别标注真/假，可下拉改归属；缺分支会标黄 | ✅ |
+| 3 | 同页点「运行」，输入 `score` 填 `0.95` | 看日志 | `condition_1` 的 `node_completed` 带 `branch:"true"`；只出现 `llm_high` 的 `node_started`，`llm_low` **一次都没跑**；模型调用 1/8 | ✅ run_e5805207：branch=true、steps=1、180 tokens |
+| 4 | 同页再运行，`score` 填 `0.2` | 看日志 | `branch:"false"`，只跑 `llm_low`，答案是安慰+建议的语气 | ✅ run_487b7061：branch=false、255 tokens |
+| 5 | `http://127.0.0.1:5173/flows/flow_43e2f4ba` | 选中「循环」节点 | 两个锚点 body / done；配置面板「分支连线」里 body 必填、done 可选；`最大轮次 3`、`退出条件` 留空 | ✅ |
+| 6 | 同页点「运行」 | 看日志与运行面板 | `loop_1` 连续 3 次 `node_completed`（round 1/2/3，前两次 `branch:"body"`、最后一次 `"done"`）；模型调用 **3/8**（每轮一次）；最后一轮文本进输出 | ✅ run_de643d5e：3 轮、steps=3、647 tokens、输出「第3轮：…」 |
+| 7 | 同页把「退出条件」改成 `{{loop_round}} >= 2` 再运行 | 看日志 | 只跑 2 轮就走 done（退出条件优先于最大轮次） | 口径已由单测覆盖 |
+| 8 | `http://127.0.0.1:5173/flows/flow_78b1ae68` 点运行 | 看运行面板 | 状态变「等待审批」，出现紫条 `human_required`，日志停在 human_1 | ✅ run_c540fe3f：waiting_human、`state.human_pending=human_1` |
+| 9 | 同页点「批准并续跑」 | 看日志 | 变「成功」；输出 `{"approved": true, "query": "…"}`；**`human_1` 的 `node_started` 只有一条**（重入不重复发） | ✅ |
+| 10 | `http://127.0.0.1:5173/flows/flow_921e8b49`（R3 工具流程） | 直接运行 | 引擎换成 graph 后工具节点照旧：`tool_call(source:"node")` → `tool_result` → 输出 echo 结果 | ✅ run_ad1bb110 |
+| 11 | `http://127.0.0.1:5173/flows/flow_fd2812d1`（R3 FC 流程） | 直接运行 | 模型调用 **2/8**、`tool_call(source:"llm")` + `tool_result`、最终答案基于 echo 结果 | ✅ run_3becaf9c：steps=2、953 tokens、¥0.002502 |
+| 12 | 随便一个 llm 流程，把 Max tokens 调到 `8` 再运行 | 看「输出结果」页 | 正文为空时顶部出黄色警告条，文案分两种：预算被 `reasoning_content` 吃满（「模型把输出预算用在了推理内容上…」）或被截断（「撞到 Max tokens 上限…」）；节点完成事件里有 `finishReason`，token 帧里有 `reasoning` | ✅ 旧案 run_78d8d9da（128 tokens 恰好用完、正文空）；新证据 run_15dfce1b：`reasoningChars=136`、`finishReason=stop`、381 个思维链帧 → 该类模型确实先花预算在思维链上 |
+| 13 | `http://127.0.0.1:8000/docs` | 接口自查 | `/api/node-types` 带 `engine`；checkpoint 表由 `langgraph-checkpoint-sqlite` 自动建在同一个 SQLite 里 | ✅ |
+
+**最快只验后端**：
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8000/api/node-types | Select-Object engine,engines
+# 条件分支：同一个流程两次运行，branch 分别是 true / false
+Invoke-RestMethod -Uri http://127.0.0.1:8000/api/flows/flow_1c485778/run -Method Post -ContentType application/json -Body '{"inputs":{"score":0.95}}'
+```
+
+### C. 口径与已知说明
+
+- **事件协议没变**：图执行器复用 `_run_llm_node` / `_run_tool_node`，`node_started` / `token` / `tool_call` / `tool_result` / `human_required` 与 R3 完全一致，前端只是多了「引擎」标识。
+- **两处状态都是真的**：`runs.state_json` 是给我方回放/续跑读的；LangGraph 的 `checkpoints` 表是图引擎自己的断点。续跑时先看 `run.state.human_pending` 找被暂停的节点，再把 state 用 `aupdate_state` 灌回图里，然后 `ainvoke(None)` 从断点继续。
+- **为什么不用官方 `interrupt()`**：它内部 `get_config()` 依赖 langchain-core 的 contextvar，而 Python 3.10 没有 `asyncio.create_task(context=...)`，异步节点的 config 上下文进不去，调用必抛 `RuntimeError: Called get_config outside of a runnable context`（langgraph 0.2 / 0.3 都能复现）。改成本项目自己的「抛异常暂停 + aupdate_state + ainvoke(None)」，语义一样是真中断，且不依赖 3.11。
+- **condition 表达式**：`{{score}} > 0.8`、`{{name}} == "张三"`、`{{done}} == true`；变量先渲染成字面量，所以字符串不用自己加引号；只允许比较/布尔/四则/下标，出现函数调用会被拒。变量没被上游写入时报「表达式引用了不存在的变量」并列出可用变量。
+- **loop 语义**：`max_rounds` 数的是**循环体执行次数**（3 表示循环体跑 3 次）；每进一次 loop 节点先判断退出（已跑满或退出条件为真），否则计一轮并走 `body`。`body` 分支必须连线，`done` 可缺省（缺省即流程结束）。回边（目标为 loop 节点的边）不算非法环。
+- **superstep 上限**：`_recursion_limit` 按节点数 + 最大轮次算（封顶 500）。触发时报 `GRAPH_RECURSION_LIMIT`，文案直接说「多半是回边没在 max_rounds 内退出」。
+- **并行分支暂不支持**：一个普通节点连多条出边会 fan-out，两条分支共享同一份 state 会互相覆盖。当前用条件边做互斥分支是安全的；真正的并行扇出留到 R5。
+- **推理模型**：`deepseek-flash` 实测会先输出思维链（`run_15dfce1b` 里 381 个 `reasoning` 帧、136 字），`completionTokens` 被它吃掉时正文就是空串——`run_78d8d9da` 把 `max_tokens=128` 恰好用完、正文为空，调大后正常。现在节点完成事件带 `reasoningChars` 与 `finishReason`，token 帧带 `reasoning`，输出页对空正文出警告条；两种成因（思维链吃满 / `length` 截断）提示文案不同，照着提示调 `Max tokens` 即可。
+- **依赖坑**：`pip install langgraph` 会把 `websockets` 顶到 16 并卸载 12，uvicorn 0.34 在 3.10 上随即起不来；同时 `langsmith` 声明需要 `websockets>=15`，pip 会报一条冲突警告（本项目不用 LangSmith tracing，忽略即可）。装完务必补一句 `pip install "websockets>=12,<13" "aiosqlite==0.21.0"`。
+- MCP / 子流程 / 知识库仍是 R5；`demo` 引擎保留给离线回归。
 
 ## R5 · MCP + RAG + Skill（B5） + 知识库页
 

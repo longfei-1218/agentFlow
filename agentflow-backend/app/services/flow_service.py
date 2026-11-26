@@ -51,12 +51,25 @@ def validate_flow(flow: Flow) -> ValidationResult:
                 ValidationIssue(node_id=node.id, message="condition 的 true/false 分支必须都连线")
             )
 
-    # 环检测：排除 loop 节点发出的回边
+    # loop 节点必须有「循环体」入口（body 分支）；done 分支不强制，缺省时直接结束
+    for node in flow.nodes:
+        if node.type != "loop":
+            continue
+        handles = {e.source_handle for e in flow.edges if e.source == node.id}
+        if "body" not in handles:
+            errors.append(
+                ValidationIssue(
+                    node_id=node.id,
+                    message="loop 节点必须有一条 body 分支连线（进入循环体），否则循环体无从开始",
+                )
+            )
+
+    # 环检测：把「回到 loop 节点的边」当作回边忽略（合法循环），其余照常查环
     indegree = {n.id: 0 for n in flow.nodes}
     adjacency: dict[str, list[str]] = {n.id: [] for n in flow.nodes}
     loop_ids = {n.id for n in flow.nodes if n.type == "loop"}
     for edge in flow.edges:
-        if edge.source in loop_ids and edge.target in loop_ids:
+        if edge.target in loop_ids:
             continue
         indegree[edge.target] += 1
         adjacency[edge.source].append(edge.target)

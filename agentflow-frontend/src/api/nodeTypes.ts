@@ -39,6 +39,9 @@ export interface NodeTypesPayload {
   llmConfigured: boolean;
   /** 已启用的工具数量：0 时配置面板会引导去工具管理新建 */
   toolsCount?: number;
+  /** 当前执行引擎：graph = LangGraph（R4 默认），loop = 手写 Agent Loop，demo = 确定性桩 */
+  engine?: string;
+  engines?: string[];
 }
 
 export const nodeTypesApi = {

@@ -33,6 +33,8 @@ interface FlowStore {
   updatePosition: (id: string, position: { x: number; y: number }) => void;
   updateConfig: (id: string, patch: Record<string, unknown>) => void;
   onConnect: (connection: Connection) => void;
+  /** 改一条连线的分支归属（画错了不用删线重拉，直接在配置面板下拉里改） */
+  updateEdgeHandle: (edgeId: string, handle: string) => void;
   removeNode: (id: string) => void;
   duplicateNode: (id: string) => void;
   removeEdge: (id: string) => void;
@@ -132,6 +134,7 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
     if (!sourceNode || !targetNode) return;
     if (sourceNode.type === "output" || targetNode.type === "input") return;
     if (sourceNode.type === "condition" && sourceHandle !== "true" && sourceHandle !== "false") return;
+    if (sourceNode.type === "loop" && sourceHandle !== "body" && sourceHandle !== "done") return;
     if (flow.edges.some((e) => e.source === source && e.target === target && e.sourceHandle === sourceHandle)) return;
 
     set({
@@ -191,6 +194,17 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
     const { flow } = get();
     set({
       flow: { ...flow, edges: flow.edges.filter((e) => e.id !== id) },
+      dirty: true,
+    });
+  },
+
+  updateEdgeHandle: (edgeId, handle) => {
+    const { flow } = get();
+    set({
+      flow: {
+        ...flow,
+        edges: flow.edges.map((e) => (e.id === edgeId ? { ...e, sourceHandle: handle } : e)),
+      },
       dirty: true,
     });
   },

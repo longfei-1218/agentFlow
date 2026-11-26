@@ -58,6 +58,12 @@ export function FlowNodeView({ data, selected }: NodeProps<AgentNode>) {
           <Handle type="source" id="true" position={Position.Right} style={{ top: "32%", background: "#10b981" }} />
           <Handle type="source" id="false" position={Position.Right} style={{ top: "68%", background: "#ef4444" }} />
         </>
+      ) : data.nodeType === "loop" ? (
+        <>
+          {/* 循环节点两个出口：body 回到循环体，done 离开循环。名称与后端的 edge sourceHandle 一致 */}
+          <Handle type="source" id="body" position={Position.Right} style={{ top: "32%", background: "#3b82f6" }} />
+          <Handle type="source" id="done" position={Position.Right} style={{ top: "68%", background: "#10b981" }} />
+        </>
       ) : data.nodeType !== "output" ? (
         <Handle type="source" id="out" position={Position.Right} />
       ) : null}

@@ -24,14 +24,30 @@ export function flowToNodes(flow: Flow, runtime: Record<string, RuntimeState>): 
   }));
 }
 
+/** 分支连线的锚点名 → 画布上显示的文字。condition 用真假，loop 用循环体/退出。 */
+export function handleLabel(handle?: string | null): string | undefined {
+  switch (handle) {
+    case "true": return "真";
+    case "false": return "假";
+    case "body": return "循环体";
+    case "done": return "退出";
+    default: return undefined;
+  }
+}
+
 export function flowToEdges(flow: Flow): Edge[] {
-  return flow.edges.map((edge) => ({
-    id: edge.id,
-    source: edge.source,
-    target: edge.target,
-    sourceHandle: edge.sourceHandle ?? undefined,
-    label: edge.sourceHandle === "true" ? "true" : edge.sourceHandle === "false" ? "false" : undefined,
-  }));
+  return flow.edges.map((edge) => {
+    const label = handleLabel(edge.sourceHandle);
+    return {
+      id: edge.id,
+      source: edge.source,
+      target: edge.target,
+      sourceHandle: edge.sourceHandle ?? undefined,
+      label,
+      labelStyle: label ? { fontSize: 10, fill: "#475569" } : undefined,
+      labelBgStyle: label ? { fill: "#f8fafc", fillOpacity: 0.85 } : undefined,
+    };
+  });
 }
 
 export const createDefaultFlow = (name = "未命名流程"): FlowCreate => ({

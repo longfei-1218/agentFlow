@@ -36,6 +36,18 @@ export function RunDrawer({ onRun, onCancel, onApprove, canRun }: Props) {
   const maxSteps = useRunStore((s) => s.maxSteps);
   const terminal = isTerminal(status);
   const approval = events.find((event) => event.type === "human_required");
+  const engine = useMemo(() => {
+    const started = events.find((event) => event.type === "run_started");
+    const value = started?.payload?.engine;
+    return typeof value === "string" ? value : null;
+  }, [events]);
+
+  // 推理模型把预算吃在思维链上时，后端会在 node_completed 里给 hint（正文为空的原因）
+  const answerHint = useMemo(() => {
+    const hinted = events.filter((event) => event.type === "node_completed" && event.payload?.hint);
+    const last = hinted[hinted.length - 1];
+    return last ? String(last.payload.hint) : null;
+  }, [events]);
 
   const elapsed = events.length > 1
     ? new Date(events[events.length - 1].createdAt).getTime() - new Date(events[0].createdAt).getTime()
@@ -72,6 +84,11 @@ export function RunDrawer({ onRun, onCancel, onApprove, canRun }: Props) {
       <div className="h-[44px] flex-shrink-0 flex items-center gap-3 px-4 border-b border-line">
         <span className="text-[13px] font-semibold">运行面板</span>
         <span className={`badge ${STATUS_BADGE[status]}`}>{STATUS_TEXT[status]}</span>
+        {engine && (
+          <span className="badge badge-gray" title="本次运行实际使用的执行引擎">
+            {engine === "langgraph" ? "LangGraph" : engine}
+          </span>
+        )}
         <span className="text-[11px] text-ink-3 font-mono">{runId ?? "未开始运行"}</span>
 
         <div className="ml-auto flex items-center gap-3">
@@ -154,6 +171,11 @@ export function RunDrawer({ onRun, onCancel, onApprove, canRun }: Props) {
 
             {tab === "output" && (
               <div className="h-full overflow-auto px-4 py-3 space-y-3">
+                {answerHint && (
+                  <div className="border border-warn/40 bg-warn-50 rounded-sm px-3 py-2 text-[12px] text-warn">
+                    正文为空：{answerHint}
+                  </div>
+                )}
                 {(streamText || status === "running") && (
                   <div>
                     <div className="text-[11px] text-ink-3 mb-1">流式输出（token 事件逐块追加）</div>

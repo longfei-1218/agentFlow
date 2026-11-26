@@ -62,6 +62,9 @@ class LLMDelta:
     """一段流式增量。text 为空表示「只带用量/成本的校准帧」。"""
 
     text: str = ""
+    # 推理模型的思维链（reasoning_content / reasoning）。它不是答案，但照样花 completion token，
+    # 必须单独透出：否则 max_tokens 被它吃满时，界面只会看到一个「空回答」而不知道原因。
+    reasoning: str = ""
     delta_tokens: int = 0          # 增量 token（含输入，用于界面实时计数）
     delta_prompt_tokens: int = 0
     delta_completion_tokens: int = 0
@@ -188,7 +191,18 @@ async def stream_completion(
                     choice = choices[0]
                     delta = choice.get("delta") or {}
                     text = delta.get("content") or ""
+                    reasoning = delta.get("reasoning_content") or delta.get("reasoning") or ""
                     finish = choice.get("finish_reason")
+
+                    if reasoning:
+                        chunk_tokens = estimate_tokens(reasoning)
+                        completion_tokens += chunk_tokens
+                        yield LLMDelta(
+                            reasoning=reasoning,
+                            delta_tokens=chunk_tokens,
+                            delta_completion_tokens=chunk_tokens,
+                            cost=_cost(0, chunk_tokens, price),
+                        )
 
                     if text:
                         accumulated_text += text

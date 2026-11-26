@@ -94,7 +94,78 @@ function ToolBindField({ node }: { node: FlowNode }) {
   );
 }
 
-/** 模型字段专用控件：优先给网关支持的模型下拉，避免手打一个网关不认的名字。 */
+/** 分支/循环节点的出边归属。拉线时选的是锚点，这里可以复核和改归属。 */
+const BRANCH_OPTIONS: Record<string, { value: string; label: string }[]> = {
+  condition: [
+    { value: "true", label: "真分支（表达式成立）" },
+    { value: "false", label: "假分支（表达式不成立）" },
+  ],
+  loop: [
+    { value: "body", label: "循环体（回到这里，再跑一轮）" },
+    { value: "done", label: "退出（离开循环）" },
+  ],
+};
+
+function BranchEdgesField({ node }: { node: FlowNode }) {
+  const edges = useFlowStore((s) => s.flow.edges);
+  const nodes = useFlowStore((s) => s.flow.nodes);
+  const updateEdgeHandle = useFlowStore((s) => s.updateEdgeHandle);
+
+  const options = BRANCH_OPTIONS[node.type];
+  if (!options) return null;
+
+  const outgoing = edges.filter((edge) => edge.source === node.id);
+  const used = new Set(outgoing.map((edge) => edge.sourceHandle));
+  const missing = options.filter((option) => !used.has(option.value));
+
+  return (
+    <div className="mb-3">
+      <div className="mb-1 text-[12px] text-ink-2">
+        分支连线
+        <span className="ml-1 text-ink-3">· 出边归属决定走哪条，改下拉即可，不用删线重拉</span>
+      </div>
+
+      {outgoing.length === 0 ? (
+        <div className="text-[11px] text-ink-3">
+          还没有出边。从节点右侧对应颜色的锚点拉线到目标节点。
+        </div>
+      ) : (
+        <div className="space-y-1.5">
+          {outgoing.map((edge) => {
+            const target = nodes.find((item) => item.id === edge.target);
+            const known = options.some((option) => option.value === edge.sourceHandle);
+            return (
+              <div key={edge.id} className="flex items-center gap-2">
+                <select
+                  className="field !py-1 !text-[12px] flex-1"
+                  value={edge.sourceHandle ?? ""}
+                  onChange={(event) => updateEdgeHandle(edge.id, event.target.value)}
+                >
+                  {!known && <option value={edge.sourceHandle ?? ""}>未标注（选一个）</option>}
+                  {options.map((option) => (
+                    <option key={option.value} value={option.value}>{option.label}</option>
+                  ))}
+                </select>
+                <span className="text-[11px] text-ink-3 font-mono shrink-0" title={target?.id}>
+                  → {target?.type ?? "?"} {edge.target}
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {missing.length > 0 && (
+        <div className="mt-1 text-[11px] text-warn">
+          缺少：{missing.map((option) => option.label).join("、")}
+          {node.type === "loop" ? "（body 必填，done 缺失时直接结束）" : "（运行校验会拦下）"}
+        </div>
+      )}
+    </div>
+  );
+}
+
+
 function ModelField({ node }: { node: FlowNode }) {
   const models = useSettingsStore((s) => s.models);
   const view = useSettingsStore((s) => s.view);
@@ -317,6 +388,8 @@ export function ConfigPanel() {
           if (spec.type === "tool" && name === "tool_id") return <ToolRefField key={name} node={node} />;
           return <FieldControl key={name} node={node} prop={prop} name={name} />;
         })}
+
+        {(spec.type === "condition" || spec.type === "loop") && <BranchEdgesField node={node} />}
 
         {(localErrors.length > 0 || nodeServerErrors.length > 0) && (
           <div className="border border-danger/30 bg-danger-50 rounded-sm px-3 py-2 text-[12px] text-danger">

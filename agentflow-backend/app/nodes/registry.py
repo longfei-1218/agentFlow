@@ -24,7 +24,8 @@ class NodeConfig(BaseModel):
 class InputConfig(NodeConfig):
     name: str = Field(default="query", title="变量名", description="运行时从 inputs 取值的键")
     type: str = Field(default="string", title="类型", json_schema_extra={"enum": ["string", "number", "boolean"]})
-    default: str = Field(default="", title="默认值", description="inputs 未提供时使用")
+    # 类型可以是 number/boolean，默认值就不能锁死成字符串，否则声明一个数字入参会校验失败
+    default: Any = Field(default="", title="默认值", description="inputs 未提供时使用")
 
 
 class LLMConfigModel(NodeConfig):
@@ -76,14 +77,18 @@ class ConditionConfig(NodeConfig):
     expression: str = Field(
         default="{{score}} > 0.8",
         title="条件表达式",
-        description="如 {{score}} > 0.8，按 true/false 分支走",
+        description="如 {{score}} > 0.8；true 走「真」分支的连线，false 走「假」分支",
         min_length=1,
     )
 
 
 class LoopConfig(NodeConfig):
     max_rounds: int = Field(default=3, title="最大轮次", ge=1, le=32)
-    exit_condition: str = Field(default="{{done}} == true", title="退出条件")
+    exit_condition: str = Field(
+        default="",
+        title="退出条件",
+        description="留空表示只按最大轮次退出；如 {{done}} == true。为真时立刻走 done 边",
+    )
 
 
 class HumanConfig(NodeConfig):
@@ -185,13 +190,13 @@ _SPEC_LIST: list[NodeSpec] = [
     ),
     NodeSpec(
         type="condition", label="分支", icon="⑂", category="控制", color="#f59e0b",
-        description="按表达式选择 true/false 分支（R4 随图执行器实装）",
-        config_model=ConditionConfig, inputs=["variables"], outputs=["true", "false"], implemented=False,
+        description="按表达式选择 true/false 分支，由图引擎的条件边只走其中一条（R4）",
+        config_model=ConditionConfig, inputs=["variables"], outputs=["true", "false"],
     ),
     NodeSpec(
         type="loop", label="循环", icon="↻", category="控制", color="#f59e0b",
-        description="有界循环（R4 交给 LangGraph 的环支持）",
-        config_model=LoopConfig, inputs=["variables"], outputs=["variables"], implemented=False,
+        description="有界循环：达到最大轮次或退出条件为真时走 done 边，否则走 body 边（R4）",
+        config_model=LoopConfig, inputs=["variables"], outputs=["variables"],
     ),
     NodeSpec(
         type="human", label="人工", icon="☝", category="控制", color="#f59e0b",

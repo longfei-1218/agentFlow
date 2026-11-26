@@ -3,6 +3,7 @@ import { Download, FileUp, Plus, Settings } from "lucide-react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { flowsApi } from "@/api/flows";
 import { useFlowStore } from "@/store/flowStore";
+import { useNodeTypeStore } from "@/store/nodeTypeStore";
 import { useLlmConfigured, useSettingsStore } from "@/store/settingsStore";
 import type { FlowCreate } from "@/types/flow";
 import { createDefaultFlow, downloadFlow } from "@/utils/flow";
@@ -15,11 +16,18 @@ const titles: Record<string, string> = {
   "/eval": "评测回归",
 };
 
+const ENGINE_LABEL: Record<string, string> = {
+  graph: "LangGraph",
+  loop: "手写 Loop",
+  demo: "演示桩",
+};
+
 export function Topbar() {
   const location = useLocation();
   const navigate = useNavigate();
   const fileRef = useRef<HTMLInputElement>(null);
   const flow = useFlowStore((s) => s.flow);
+  const engine = useNodeTypeStore((s) => s.engine);
   const openSettings = useSettingsStore((s) => s.openModal);
   const configured = useLlmConfigured();
   const isFlowRoute = location.pathname.startsWith("/flows");
@@ -55,6 +63,14 @@ export function Topbar() {
       </div>
 
       <div className="flex items-center gap-2">
+        {engine && (
+          <span
+            className="chip !text-ink-2"
+            title="执行引擎：graph = LangGraph（条件边 / 有界循环 / checkpointer 续跑），loop = R2 手写 Agent Loop"
+          >
+            引擎 {ENGINE_LABEL[engine] ?? engine}
+          </span>
+        )}
         {!configured && (
           <button
             className="chip !text-warn !border-warn/40"

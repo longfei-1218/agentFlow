@@ -25,6 +25,9 @@ DEFAULT_STATE = {
     "model": None,
     "tool_calls": [],     # R3：本次 run 里真实执行过的工具调用摘要
     "tool_errors": [],    # R3：FC 里回给模型的工具错误（不致命，但要留痕）
+    "outputs": {},        # R4：output 节点产出的字段（图执行器直接写在 state 里）
+    "branch": {},         # R4：condition / loop 节点本轮走的分支，条件边据此路由
+    "loop_rounds": {},    # R4：每个 loop 节点已经跑了第几轮
 }
 
 # 节点在 node_started 事件里露出的摘要字段：让界面显示「模型/温度」而不是整坨 config

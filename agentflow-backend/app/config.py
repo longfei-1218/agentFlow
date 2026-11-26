@@ -14,7 +14,10 @@ class Settings(BaseSettings):
 
     # 执行引擎
     MAX_STEPS: int = 8      # 一次运行里允许的 LLM 调用次数上限（防无限自我循环）
-    RUNNER: str = "loop"    # loop = 真调模型（llm 节点）；demo = 确定性桩，用于离线回归
+    # graph = LangGraph（R4 起的默认：条件边 + 有界循环 + checkpointer 中断续跑）
+    # loop  = R2 手写 Agent Loop（仅线性拓扑，保留做对照/兜底）
+    # demo  = 确定性桩，不联网，用于离线回归
+    RUNNER: str = "graph"
     DEMO_STEP_DELAY: float = 0.05  # 节点间停顿（秒），测试里调大以验证取消
 
     CORS_ORIGINS: list[str] = ["http://localhost:5173"]

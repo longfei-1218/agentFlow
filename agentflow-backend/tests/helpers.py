@@ -32,4 +32,6 @@ async def wait_for_status(client, run_id: str, expected: set[str], timeout: floa
         if last["status"] in expected:
             return last
         await asyncio.sleep(0.05)
-    raise AssertionError(f"run {run_id} 状态停留于 {last.get('status')}，期望 {expected}")
+    raise AssertionError(
+        f"run {run_id} 状态停留于 {last.get('status')}，期望 {expected}；error={last.get('error')}"
+    )

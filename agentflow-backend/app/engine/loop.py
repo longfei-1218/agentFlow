@@ -321,6 +321,8 @@ async def _run_llm_node(
     rounds = 0
     answer = ""
     usage: dict | None = None
+    reasoning_chars = 0
+    finish_reason: str | None = None
 
     while True:
         if state["steps"] >= limit:
@@ -331,7 +333,7 @@ async def _run_llm_node(
         state["steps"] += 1
         rounds += 1
 
-        text, tool_calls, call_usage = await _stream_once(
+        text, tool_calls, call_usage, round_reasoning_chars, finish_reason_from_round = await _stream_once(
             run_id,
             node,
             state,
@@ -345,6 +347,8 @@ async def _run_llm_node(
         )
         if call_usage:
             usage = call_usage
+        reasoning_chars += round_reasoning_chars
+        finish_reason = finish_reason or finish_reason_from_round
         if stop.is_set():
             return
 
@@ -383,11 +387,25 @@ async def _run_llm_node(
                 "estimated": True,
             },
             "chars": len(answer),
+            "reasoningChars": reasoning_chars,
+            "finishReason": finish_reason,
             "modelCalls": rounds,
             "toolCalls": rounds - 1 if rounds > 1 else 0,
             "boundTools": [tool.name for tool in bound_tools],
         }
     )
+    if not answer.strip() and reasoning_chars:
+        # 推理模型把预算花在思维链上时，正文会是空的：别让用户以为是工具/网络坏了
+        completed_payload["emptyAnswer"] = True
+        completed_payload["hint"] = (
+            f"模型把输出预算用在了推理内容上（{reasoning_chars} 字思维链），正文为空；"
+            "把 Max tokens 调大，或换一个非推理模型"
+        )
+    elif not answer.strip() and finish_reason == "length":
+        completed_payload["emptyAnswer"] = True
+        completed_payload["hint"] = (
+            f"模型输出撞到 Max tokens 上限（{max_tokens}）后被截断，正文为空；把 Max tokens 调大再跑"
+        )
 
 
 async def _stream_once(
@@ -402,11 +420,16 @@ async def _stream_once(
     temperature: float | None,
     max_tokens: int | None,
     tools: list[dict] | None,
-) -> tuple[str, list[dict], dict | None]:
-    """调一次模型并把 token 帧写进事件流。返回 (文本, 工具调用, usage)。"""
+) -> tuple[str, list[dict], dict | None, int, str | None]:
+    """调一次模型并把 token 帧写进事件流。
+
+    返回 (文本, 工具调用, usage, 思维链字符数, finish_reason)。
+    """
     text_parts: list[str] = []
     tool_calls: list[dict] = []
     usage: dict | None = None
+    reasoning_chars = 0
+    finish_reason: str | None = None
 
     async for delta in stream_completion(
         llm_config,
@@ -420,14 +443,20 @@ async def _stream_once(
             break
         if delta.text:
             text_parts.append(delta.text)
+        if delta.reasoning:
+            reasoning_chars += len(delta.reasoning)
         if delta.tool_calls:
             tool_calls = delta.tool_calls
-        if delta.text or delta.delta_tokens or delta.cost:
+        if delta.finish_reason:
+            finish_reason = delta.finish_reason
+        if delta.text or delta.reasoning or delta.delta_tokens or delta.cost:
             # 只带用量的校准帧也要进事件流：否则「运行卡片的总 token」与节点统计会对不上
+            # reasoning 单独放在 payload.reasoning 里，不计入可见正文
             await event_bus.emit(
                 run_id, "token", node.id,
                 {
                     "text": delta.text,
+                    "reasoning": delta.reasoning or None,
                     "deltaTokens": delta.delta_tokens,
                     "cost": round(delta.cost, 6),
                 },
@@ -439,7 +468,7 @@ async def _stream_once(
         if delta.usage:
             usage = delta.usage
 
-    return "".join(text_parts), tool_calls, usage
+    return "".join(text_parts), tool_calls, usage, reasoning_chars, finish_reason
 
 
 async def _exec_fc_tool(

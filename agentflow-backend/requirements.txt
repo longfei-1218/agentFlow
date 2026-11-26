@@ -4,9 +4,16 @@
 fastapi>=0.115,<1.0
 uvicorn[standard]>=0.30,<0.35
 websockets>=12.0,<13.0
-aiosqlite>=0.20,<1.0
+# aiosqlite 0.22 去掉了 Connection.is_alive，而 langgraph-checkpoint-sqlite 2.x 依赖它，故锁 0.21
+aiosqlite>=0.20,<0.22
 pydantic>=2.10,<3.0
 pydantic-settings>=2.7,<3.0
 sse-starlette>=2.1,<3.0
 python-multipart>=0.0.20
 orjson>=3.10,<4.0
+
+# R4：图执行器（条件边 / 有界循环 / checkpointer 中断续跑）
+# 注意：安装时 langsmith 会声明需要 websockets>=15，pip 会报一条冲突警告；
+# 本项目不用 LangSmith 云端 tracing，保持 websockets 12 才能让 uvicorn 0.34 在 Python 3.10 跑起来。
+langgraph==0.2.76
+langgraph-checkpoint-sqlite==2.0.9

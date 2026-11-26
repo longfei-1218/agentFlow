@@ -174,6 +174,74 @@ async def test_model_mismatch_error_says_which_model_and_node(client, monkeypatc
     assert failed.payload["modelFromNode"] is True
 
 
+async def test_reasoning_only_stream_reports_empty_answer_hint(client, monkeypatch):
+    """推理模型把 max_tokens 花在 reasoning_content 上时，正文为空但必须给出可读原因。"""
+    from app.services.llm import LLMDelta
+
+    async def reasoning_stream(config, messages, *, model=None, temperature=None, max_tokens=None, tools=None):
+        yield LLMDelta(delta_tokens=10, delta_prompt_tokens=10, cost=0.0001)
+        for piece in ("思考中……", "先分析题目"):
+            yield LLMDelta(reasoning=piece, delta_tokens=4, delta_completion_tokens=4, cost=0.00002)
+        yield LLMDelta(usage={"promptTokens": 10, "completionTokens": 8, "totalTokens": 18})
+
+    monkeypatch.setattr("app.engine.loop.stream_completion", reasoning_stream)
+
+    flow = await _flow(
+        client,
+        [
+            node("input_1", "input", name="query"),
+            node("llm_1", "llm", 200, system="你是助手", max_tokens=8),
+            node("output_1", "output", 400, fields=["text"]),
+        ],
+        [edge("e_1", "input_1", "llm_1"), edge("e_2", "llm_1", "output_1")],
+        name="只有思维链",
+    )
+    run = (await client.post(f"/api/flows/{flow['id']}/run", json={"inputs": {"query": "x"}})).json()
+    final = await wait_for_status(client, run["id"], {"succeeded"})
+
+    history = await event_bus.history(run["id"])
+    reasoning_tokens = [event for event in history if event.type == "token" and event.payload.get("reasoning")]
+    assert reasoning_tokens, "思维链必须作为 reasoning 透出，而不是悄悄丢掉"
+    assert all(event.payload["text"] == "" for event in reasoning_tokens)
+    assert final["outputs"]["text"] == ""
+
+    llm_done = [e for e in history if e.type == "node_completed" and e.node_id == "llm_1"][-1]
+    assert llm_done.payload["reasoningChars"] > 0
+    assert llm_done.payload["emptyAnswer"] is True
+    assert "Max tokens" in llm_done.payload["hint"]
+
+
+async def test_empty_answer_due_to_length_limit_is_explained(client, monkeypatch):
+    """正文为空且 finish_reason=length 时，必须告诉用户是 Max tokens 截断。"""
+    from app.services.llm import LLMDelta
+
+    async def length_stream(config, messages, *, model=None, temperature=None, max_tokens=None, tools=None):
+        yield LLMDelta(delta_tokens=5, delta_prompt_tokens=5)
+        yield LLMDelta(finish_reason="length")
+        yield LLMDelta(usage={"promptTokens": 5, "completionTokens": 0, "totalTokens": 5})
+
+    monkeypatch.setattr("app.engine.loop.stream_completion", length_stream)
+
+    flow = await _flow(
+        client,
+        [
+            node("input_1", "input", name="query"),
+            node("llm_1", "llm", 200, system="你是助手", max_tokens=8),
+            node("output_1", "output", 400, fields=["text"]),
+        ],
+        [edge("e_1", "input_1", "llm_1"), edge("e_2", "llm_1", "output_1")],
+        name="长度截断",
+    )
+    run = (await client.post(f"/api/flows/{flow['id']}/run", json={"inputs": {"query": "x"}})).json()
+    await wait_for_status(client, run["id"], {"succeeded"})
+
+    history = await event_bus.history(run["id"])
+    llm_done = [e for e in history if e.type == "node_completed" and e.node_id == "llm_1"][-1]
+    assert llm_done.payload["finishReason"] == "length"
+    assert llm_done.payload["emptyAnswer"] is True
+    assert "截断" in llm_done.payload["hint"]
+
+
 async def test_human_approval_resume_still_works_in_loop(client):
     flow = await _flow(
         client,

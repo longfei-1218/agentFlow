@@ -1,6 +1,6 @@
 # AgentFlow Studio · 后端
 
-FastAPI + aiosqlite + sse-starlette + httpx。当前进度：**B3 完成**（工具注册表 + 真 Function Calling）。
+FastAPI + aiosqlite + sse-starlette + httpx + LangGraph。当前进度：**B4 完成**（图执行器：条件边、有界循环、checkpointer 中断续跑）。
 
 ## 已实现
 
@@ -30,11 +30,13 @@ FastAPI + aiosqlite + sse-starlette + httpx。当前进度：**B3 完成**（工
 - `POST /api/runs/{id}/to-case`：失败 Run 转评测 Case
 
 **执行器**
-- `app/engine/executor.py`：`RUNNER=loop|demo` 选择器
-- `app/engine/loop.py`：手写 Agent Loop。input / prompt / llm / tool / output / human 真执行；`MAX_STEPS` 数 **模型调用次数**（FC 的多轮也逐轮计数），超限抛 `StepLimitExceeded` → `run_failed{code:STEP_LIMIT_EXCEEDED}`（服务不崩）
-- `app/engine/common.py`：拓扑排序、state 快照、可取消等待、终态收尾（demo 与 loop 共用）
+- `app/engine/executor.py`：`RUNNER=graph|loop|demo` 选择器，**默认 graph**
+- `app/engine/graph_runner.py`（R4）：把 DSL 编译成 `StateGraph`。普通边照连；`condition` / `loop` 用条件边按 `edge.sourceHandle`（true/false、body/done）路由；`human` 抛 `HumanPause` 停下，checkpoint 留在 `langgraph-checkpoint-sqlite` 的 `checkpoints` 表。superstep 上限按节点数与最大轮次估算，触发时报 `GRAPH_RECURSION_LIMIT`
+- `app/engine/expr.py`（R4）：条件表达式求值。`{{var}}` 渲染成 Python 字面量后过 AST 白名单（比较/布尔/四则/下标），禁函数调用与属性访问；变量缺失、语法错、求值失败都转成可读 `CONDITION_INVALID`
+- `app/engine/loop.py`：R2 手写 Agent Loop，保留做对照（线性拓扑、不支持条件分支与回边）；其 `_run_llm_node` / `_run_tool_node` 被图执行器复用，保证两种引擎的模型/工具行为完全一致
+- `app/engine/common.py`：拓扑排序、state 快照、可取消等待、终态收尾
 - `app/engine/demo_runner.py`：确定性桩，不联网，用于回归与前端联调
-- 占位节点（mcp / skill / knowledge / condition / loop 直通并标 `skipped`）留到 B4–B5
+- 占位节点（mcp / skill / knowledge 直通并标 `skipped`）留到 B5
 - `tools/fake_llm.py`：本地假模型（OpenAI 兼容，仅验收用，不参与产品逻辑）
 
 ## 关键设计
@@ -56,6 +58,11 @@ FastAPI + aiosqlite + sse-starlette + httpx。当前进度：**B3 完成**（工
 | 重复调用造成副作用 | 幂等 key = `sha1(tool_id + 排序参数)`，TTL 内命中直接复用上次成功结果，记录 `idemHit=1/attempts=0`；`none` 策略可关掉 |
 | 工具失败要不要弄挂 run | 区分意图：tool 节点是用户写死的调用，失败即 `run_failed`；FC 里的失败作为 `tool` 消息回给模型，让它改参数重试 |
 | 两次 run 的 state 串味 | `DEFAULT_STATE` 里 `tool_calls/tool_errors` 是 list，浅拷贝会共享；改成 `copy.deepcopy` 并在测试里守住 |
+| 线性执行器做不了条件分支 | 拓扑序会把真假两条分支都跑一遍。R4 换成 `StateGraph`：condition 用 `add_conditional_edges` 只走一条，分支归属来自边的 `sourceHandle` |
+| 回边会被当成非法环 | 环检测只忽略「以 loop 节点为终点」的边；loop 自己的 `body` 边照常参与排序，校验还要求 body 分支必须连线 |
+| 同步 `interrupt()` 用不了 | Python 3.10 没有 `asyncio.create_task(context=...)`，langchain-core 的 config contextvar 进不去异步节点，官方 `interrupt()` 必抛 `Called get_config outside of a runnable context`。改为抛 `HumanPause` 暂停 + `aupdate_state` 灌回 state + `ainvoke(None)` 从检查点续跑；用 `run.state.human_pending` 判断续跑的是哪个节点，节点重入时不重复发 `node_started` |
+| 图状态与我方 state 两套 | 图里只有一个字段 `data`（R1 起的 state 字典），节点原地改这个 dict 并返回它；每步都 `write_state` 落 `runs.state_json`，checkpoint 只负责「执行位置」。两套都写，回放与续跑各取所需 |
+| 推理模型正文为空 | `delta.content` 之外还有 `reasoning_content`（deepseek-flash 实测会先吐思维链）：现在单独透出（token 帧的 `reasoning`）、照样计费，节点完成事件带 `reasoningChars` 与 `finishReason`；正文为空时按「思维链吃满预算」或「`finish_reason=length` 截断」两种成因给不同 `emptyAnswer` + `hint` |
 
 ## 本地启动
 
@@ -68,25 +75,33 @@ uvicorn app.main:app --reload --reload-dir app --port 8000
 
 `--reload-dir app` 别省：默认会监视 `.venv`，重装依赖时 reload 会卡死并留下占住端口的僵尸进程。
 
+**装依赖时的两个坑**（都在 `requirements.txt` 里锁好了，手动 `pip install langgraph` 时要留意）：
+1. pip 会把 `websockets` 顶到 16.1，`uvicorn 0.34` 在 Python 3.10 上随即起不来 → 补 `pip install "websockets>=12,<13"`（pip 会警告 `langsmith requires websockets>=15`，本项目不用 LangSmith tracing，忽略）。
+2. `aiosqlite 0.22` 删掉了 `Connection.is_alive`，checkpointer 2.x 启动即 `AttributeError` → 锁 `aiosqlite==0.21.0`。
+3. `langgraph` 官方 `interrupt()` 在 3.10 的异步节点里不可用（config contextvar 进不去），本项目用「抛 `HumanPause` + `aupdate_state` + `ainvoke(None)`」实现同样的真中断，见 `graph_runner.py` 注释。
+
 Swagger: http://localhost:8000/docs
 
 ## 测试
 
 ```bash
-.venv\Scripts\python.exe -m pytest      # 43 passed
+.venv\Scripts\python.exe -m pytest      # 54 passed
 ```
 
 覆盖：Flow 版本语义与校验、节点配置校验、节点 Schema 导出、Key 脱敏与优先级、
 SSE 到终态、筛选、节点统计、取消、审批续跑、序号恢复、真流式 token 帧与 usage 校准、
 `MAX_STEPS` 守卫、未配 Key 的 409 与无模型流程照常可跑、
 工具 CRUD 与重名 409、内置 Schema 覆盖、参数缺失拒绝、5xx 重试到第 3 次成功、**4xx 不重试**、
-幂等命中、tool 节点真执行并落调用记录、工具不存在失败、**FC 两轮回路**、FC 逐轮计步、两次 run 的 state 隔离。
+幂等命中、tool 节点真执行并落调用记录、工具不存在失败、**FC 两轮回路**、FC 逐轮计步、两次 run 的 state 隔离、
+**图引擎线性执行**、条件分支只走一条、表达式变量缺失报错、有界循环跑满/退出条件提前退出、
+**human 暂停后从 checkpoint 续跑且不重复 node_started**、取消不被后台任务改写、
+思维链吃满预算的空回答提示、`finish_reason=length` 截断的空回答提示。
 
 ## 下一步
 
 | 步 | 内容 |
 |---|---|
 | B3 ✅ | 工具注册表：FC 工具 CRUD、超时、重试、幂等、真 Function Calling |
-| B4 | LangGraph 编译 + checkpointer 真中断续跑（condition / loop 交给图引擎） |
+| B4 ✅ | LangGraph 图执行器：条件边、有界循环、checkpointer 中断续跑 |
 | B5 | MCP 客户端、RAG 知识库、skill 子流程 |
 | B6 | 评测体系（三层采集器 / pass^k / judge / 门禁）与 Docker |
