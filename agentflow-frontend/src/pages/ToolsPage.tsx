@@ -219,10 +219,12 @@ export function ToolsPage() {
         <div className="flex items-center gap-2 mb-2">
           <Server size={15} className="text-info" />
           <span className="font-semibold text-[13px]">MCP Server</span>
-          <span className="badge badge-blue ml-auto">R5</span>
+          <span className="badge badge-green ml-auto">R5 已实装</span>
         </div>
-        <div className="text-[12px] text-ink-3">
-          支持 stdio / sse，运行时动态发现工具；本轮不实装，mcp 节点仍是直通占位。
+        <div className="text-[12px] text-ink-2 leading-relaxed">
+          stdio JSON-RPC Server 在
+          <button className="text-primary hover:underline mx-1" onClick={() => navigate("/mcp")}>「MCP 服务」页</button>
+          注册与探测工具；画布 mcp 节点调用时重新握手，不做常驻连接。
         </div>
       </section>
 

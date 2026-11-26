@@ -57,6 +57,19 @@ class EventBus:
         node_id: str | None = None,
         payload: dict | None = None,
     ) -> RunEvent:
+        # 空 run_id 表示「内联子流程」：它的中间事件不落库、不推流，只要最终 outputs。
+        # 这条规则让子流程能复用同一套节点实现，而不用到处传「要不要发事件」。
+        if not run_id:
+            return RunEvent(
+                id="ev_ephemeral",
+                run_id="",
+                seq=0,
+                type=event_type,
+                node_id=node_id,
+                payload=payload or {},
+                created_at=utc_now(),
+            )
+
         async with self._lock:
             await self._ensure_seq(run_id)
             seq = self._seq[run_id] + 1

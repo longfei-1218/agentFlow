@@ -4,6 +4,7 @@ export type RunStatus =
 export type EventType =
   | "run_started" | "node_started" | "node_completed"
   | "token" | "tool_call" | "tool_result"
+  | "knowledge_retrieved"
   | "human_required" | "run_completed" | "run_failed";
 
 export interface RunEvent {

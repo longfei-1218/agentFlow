@@ -85,19 +85,47 @@ CREATE TABLE IF NOT EXISTS mcp_servers (
     name TEXT NOT NULL UNIQUE,
     transport TEXT NOT NULL,
     command_or_url TEXT NOT NULL,
-    enabled INTEGER NOT NULL DEFAULT 1
+    enabled INTEGER NOT NULL DEFAULT 1,
+    -- 整份 MCPServerDef（含 args/env/cwd/timeout）在这里，上面几列只是列表页冗余
+    definition_json TEXT,
+    created_at TEXT,
+    updated_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS knowledge_bases (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
     collection TEXT NOT NULL UNIQUE,
-    chunk_size INTEGER NOT NULL DEFAULT 500,
+    chunk_size INTEGER NOT NULL DEFAULT 400,
     overlap INTEGER NOT NULL DEFAULT 50,
-    embedding_model TEXT NOT NULL DEFAULT 'bge-small-zh',
+    embedding_model TEXT NOT NULL DEFAULT 'bm25-local',
     doc_count INTEGER NOT NULL DEFAULT 0,
-    chunk_count INTEGER NOT NULL DEFAULT 0
+    chunk_count INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT,
+    updated_at TEXT
 );
+
+CREATE TABLE IF NOT EXISTS kb_documents (
+    id TEXT PRIMARY KEY,
+    kb_id TEXT NOT NULL,
+    title TEXT NOT NULL,
+    content TEXT NOT NULL,
+    chunk_count INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (kb_id) REFERENCES knowledge_bases(id)
+);
+
+CREATE TABLE IF NOT EXISTS kb_chunks (
+    id TEXT PRIMARY KEY,
+    kb_id TEXT NOT NULL,
+    doc_id TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    text TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (doc_id) REFERENCES kb_documents(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_chunks_kb ON kb_chunks(kb_id);
 
 CREATE TABLE IF NOT EXISTS eval_sets (
     id TEXT PRIMARY KEY,

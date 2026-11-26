@@ -59,18 +59,35 @@ class ToolConfig(NodeConfig):
 
 
 class MCPConfig(NodeConfig):
-    server_id: str = Field(default="", title="MCP Server")
-    tool_name: str = Field(default="", title="工具名称")
+    server_id: str = Field(default="", title="MCP Server", description="在「MCP 服务」页注册的 stdio server")
+    tool_name: str = Field(default="", title="工具名称", description="该 Server 上 tools/list 里的工具名")
+    args_template: str = Field(
+        default="{}",
+        title="参数模板",
+        description='JSON，支持 {{变量}} 插值，如 {"text": "{{query}}"}',
+    )
 
 
 class SkillConfig(NodeConfig):
-    flow_id: str = Field(default="", title="子流程 ID")
+    flow_id: str = Field(default="", title="子流程 ID", description="把另一个流程当子流程调，嵌套上限 3 层")
+    inputs_template: str = Field(
+        default="{}",
+        title="子流程入参模板",
+        description='JSON，支持 {{变量}} 插值，如 {"query": "{{query}}"}',
+    )
 
 
 class KnowledgeConfig(NodeConfig):
     kb_id: str = Field(default="", title="知识库 ID")
+    query_template: str = Field(
+        default="{{query}}", title="检索 Query", description="用 {{变量}} 插值，默认取上游的 query"
+    )
     top_k: int = Field(default=4, title="Top K", ge=1, le=20)
-    rerank: bool = Field(default=False, title="启用重排")
+    rerank: bool = Field(
+        default=False,
+        title="启用重排",
+        description="MMR 去冗余（零成本，不调模型）：把同一段话的重复块压掉",
+    )
 
 
 class ConditionConfig(NodeConfig):
@@ -175,18 +192,18 @@ _SPEC_LIST: list[NodeSpec] = [
     ),
     NodeSpec(
         type="mcp", label="MCP", icon="⊕", category="工具", color="#10b981",
-        description="调用 MCP Server 上的工具（R5 实装）",
-        config_model=MCPConfig, inputs=["variables"], outputs=["result"], implemented=False,
+        description="调用 MCP Server 上的工具（stdio JSON-RPC：initialize → tools/list → tools/call）",
+        config_model=MCPConfig, inputs=["variables"], outputs=["result"],
     ),
     NodeSpec(
         type="skill", label="子流程", icon="⤴", category="工具", color="#10b981",
-        description="把另一个流程当子流程调用（R5 实装）",
-        config_model=SkillConfig, inputs=["variables"], outputs=["variables"], implemented=False,
+        description="把另一个流程当子流程内联执行，输出合并回当前变量（嵌套上限 3 层）",
+        config_model=SkillConfig, inputs=["variables"], outputs=["variables"],
     ),
     NodeSpec(
         type="knowledge", label="知识", icon="▤", category="工具", color="#10b981",
-        description="检索知识库并注入上下文（R5 实装）",
-        config_model=KnowledgeConfig, inputs=["query"], outputs=["context"], implemented=False,
+        description="BM25 检索知识库，把命中片段拼成 context 注入下游（可 MMR 去冗余）",
+        config_model=KnowledgeConfig, inputs=["query"], outputs=["context"],
     ),
     NodeSpec(
         type="condition", label="分支", icon="⑂", category="控制", color="#f59e0b",
@@ -229,6 +246,13 @@ REQUIRED_NON_EMPTY = {
     ("human", "message"),
     ("tool", "tool_id"),
     ("tool", "args_template"),
+    ("mcp", "server_id"),
+    ("mcp", "tool_name"),
+    ("mcp", "args_template"),
+    ("skill", "flow_id"),
+    ("skill", "inputs_template"),
+    ("knowledge", "kb_id"),
+    ("knowledge", "query_template"),
 }
 
 

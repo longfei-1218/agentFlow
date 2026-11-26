@@ -1,0 +1,18 @@
+INFO:     Will watch for changes in these directories: ['E:\\workplace\\workplaceReactNative\\agentFlow\\agentflow-backend\\app']
+INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+INFO:     Started reloader process [13600] using WatchFiles
+INFO:     Started server process [40156]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+E:\workplace\workplaceReactNative\agentFlow\agentflow-backend\.venv\lib\site-packages\langgraph\checkpoint\base\__init__.py:18: LangChainPendingDeprecationWarning: The default value of `allowed_objects` will change in a future version. Pass an explicit value (e.g., allowed_objects='messages' or allowed_objects='core') to suppress this warning.
+  from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
+WARNING:  WatchFiles detected changes in 'app\engine\extra_nodes.py'. Reloading...
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [40156]
+INFO:     Started server process [10012]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+E:\workplace\workplaceReactNative\agentFlow\agentflow-backend\.venv\lib\site-packages\langgraph\checkpoint\base\__init__.py:18: LangChainPendingDeprecationWarning: The default value of `allowed_objects` will change in a future version. Pass an explicit value (e.g., allowed_objects='messages' or allowed_objects='core') to suppress this warning.
+  from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer

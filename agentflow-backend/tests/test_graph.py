@@ -269,4 +269,5 @@ async def test_node_types_reports_engine_and_control_nodes_implemented(client):
     specs = {item["type"]: item for item in payload["types"]}
     assert specs["condition"]["implemented"] is True
     assert specs["loop"]["implemented"] is True
-    assert specs["mcp"]["implemented"] is False
+    assert specs["mcp"]["implemented"] is True
+    assert specs["knowledge"]["implemented"] is True

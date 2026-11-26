@@ -94,31 +94,58 @@ class Database:
 db = Database()
 
 
-async def _migrate(conn: aiosqlite.Connection) -> None:
-    """就地补列：CREATE TABLE IF NOT EXISTS 不会给已存在的旧表加字段。
-
-    R3 给 `tools` 加了 definition_json / created_at / updated_at，
-    老库（`tools` 表 6 列那版）不用删库，连上来时自动补齐即可。
-    """
-    cursor = await conn.execute("PRAGMA table_info(tools)")
+async def _ensure_columns(
+    conn: aiosqlite.Connection, table: str, additions: dict[str, str]
+) -> set[str]:
+    """给已存在的老表补列，返回「补列之前」的列名集合（用于判断要不要回填数据）。"""
+    cursor = await conn.execute(f"PRAGMA table_info({table})")
     try:
-        columns = {row[1] for row in await cursor.fetchall()}
+        existing = {row[1] for row in await cursor.fetchall()}
     finally:
         await cursor.close()
 
-    additions = {
-        "definition_json": "TEXT",
-        "created_at": "TEXT",
-        "updated_at": "TEXT",
-    }
     for name, ddl in additions.items():
-        if name not in columns:
-            await conn.execute(f"ALTER TABLE tools ADD COLUMN {name} {ddl}")
+        if name not in existing:
+            await conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
+    return existing
 
+
+async def _migrate(conn: aiosqlite.Connection) -> None:
+    """就地补列：CREATE TABLE IF NOT EXISTS 不会给已存在的旧表加字段。
+
+    R3 给 `tools` 加了 definition_json / created_at / updated_at；
+    R5 又给 `mcp_servers` / `knowledge_bases` 补了 definition_json 与时间戳。
+    老库不用删，连上来自动补齐即可。
+    """
+    old_columns = await _ensure_columns(
+        conn,
+        "tools",
+        {
+            "definition_json": "TEXT",
+            "created_at": "TEXT",
+            "updated_at": "TEXT",
+        },
+    )
     # 老行没有时间戳：补一个，列表排序才不会把历史工具顶到最前面
-    if "created_at" in additions and "created_at" not in columns:
+    if "created_at" not in old_columns:
         await conn.execute("UPDATE tools SET created_at = '2026-01-01T00:00:00+00:00' WHERE created_at IS NULL")
         await conn.execute("UPDATE tools SET updated_at = created_at WHERE updated_at IS NULL")
+
+    await _ensure_columns(
+        conn,
+        "mcp_servers",
+        {
+            "definition_json": "TEXT",
+            "created_at": "TEXT",
+            "updated_at": "TEXT",
+        },
+    )
+
+    await _ensure_columns(
+        conn,
+        "knowledge_bases",
+        {"created_at": "TEXT", "updated_at": "TEXT"},
+    )
 
 
 async def get_db() -> aiosqlite.Connection:

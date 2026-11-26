@@ -1,6 +1,6 @@
 # AgentFlow Studio · 后端
 
-FastAPI + aiosqlite + sse-starlette + httpx + LangGraph。当前进度：**B4 完成**（图执行器：条件边、有界循环、checkpointer 中断续跑）。
+FastAPI + aiosqlite + sse-starlette + httpx + LangGraph。当前进度：**B5 完成**（MCP stdio 客户端、知识库 BM25 检索、skill 子流程内联）。
 
 ## 已实现
 
@@ -21,6 +21,14 @@ FastAPI + aiosqlite + sse-starlette + httpx + LangGraph。当前进度：**B4 �
 - `app/services/tool_runner.py`：按 `params_schema` 校验必填/类型/enum → 幂等查缓存（`sha1(tool_id + 排序参数)` + TTL）→ 带超时与指数退避重试地调用（**只重试连接错误/超时/5xx，4xx 立即失败**）→ 落调用记录；内置 `echo` / `now` / `calc`（`calc` 用 AST 白名单，不用 `eval`）
 - `app/engine/loop.py`：tool 节点真执行（参数模板 `{{var}}` 插值 → JSON 解析 → 调用）；llm 节点真 Function Calling（模型要工具 → 执行 → 回填 `tool` 消息 → 再问一次），**MAX_STEPS 逐轮计数**；FC 里的工具失败回给模型继续，tool 节点失败则 run 失败
 
+**扩展能力（R5）**
+- `app/models/mcp.py` + `app/services/mcp_repo.py` + `app/services/mcp_client.py`：MCP Server 只支持 `stdio`（command/args/env/cwd/timeout/enabled，整份定义存 `mcp_servers.definition_json`）。客户端是**同步 `subprocess.Popen` + 后台线程 + `asyncio.to_thread`**：`initialize`（protocolVersion 2024-11-05）→ `notifications/initialized` → `tools/list` / `tools/call`，`threading.Timer` watchdog 超时 kill，stderr 收集末 3 行拼进错误。
+- `app/api/mcp.py`：`/api/mcp-servers` CRUD、`GET /{id}/tools`（探测）、`POST /{id}/call`（试跑）。配置期失败一律 **200 + `ok:false` + code**（`MCP_SPAWN_FAILED / MCP_TIMEOUT / MCP_SERVER_EXITED / MCP_RPC_ERROR / MCP_TOOL_ERROR / MCP_NOT_CONFIGURED / MCP_TRANSPORT_UNSUPPORTED`）。
+- `app/models/knowledge.py` + `app/services/knowledge_rag.py` + `app/services/knowledge_repo.py` + `app/api/knowledge.py`：知识库/文档 CRUD、切块（按句 → 按字数打包 → 超长句带 overlap 硬切）、BM25（k1=1.2 / b=0.75）、MMR 去冗余（0.7 相关性 − 0.3 Jaccard）、空库/无命中 hint；`kb_documents` / `kb_chunks` 两表，删文档先删块再删文档（否则外键失败），计数实时重算。
+- `app/engine/extra_nodes.py` + `app/engine/subflow.py`：mcp / knowledge / skill 三类节点。skill 用 `MemorySaver` **内联编译**子流程（不开事件、不落 runs、不写检查点），outputs 合并回父变量、tokens/cost 累加；限 3 层、拒自递归、拒含 `human` 的子流程。错误统一为 `NodeError(code)`，由 `graph_runner` / `loop` 落 `run_failed` 并带 `nodeId`。
+- `app/services/event_bus.py`：`run_id` 为空时只返回临时事件，**不写 `run_events`、不推 SSE**——这是子流程复用节点实现的前提。
+- `scripts/mcp_demo_server.py`：纯标准库的最小 MCP stdio server（`echo/add/now`），联调与验收用。
+
 **Run**
 - `GET /api/runs` 支持 `flow_id / status / started_after / started_before / limit`
 - `GET /api/runs/{id}/stats`：按节点聚合 token、耗时、成本、状态
@@ -36,7 +44,8 @@ FastAPI + aiosqlite + sse-starlette + httpx + LangGraph。当前进度：**B4 �
 - `app/engine/loop.py`：R2 手写 Agent Loop，保留做对照（线性拓扑、不支持条件分支与回边）；其 `_run_llm_node` / `_run_tool_node` 被图执行器复用，保证两种引擎的模型/工具行为完全一致
 - `app/engine/common.py`：拓扑排序、state 快照、可取消等待、终态收尾
 - `app/engine/demo_runner.py`：确定性桩，不联网，用于回归与前端联调
-- 占位节点（mcp / skill / knowledge 直通并标 `skipped`）留到 B5
+- `build_graph(emit_events=True, persist_state=True)` 两个开关：顶层运行全开；`subflow` 内联编译时全关（不发事件、不写 `runs.state`），所以子流程能复用同一套节点实现而不污染父 run
+- 11 类节点到 B5 全部实装，`PLACEHOLDER_NODES` 已清空
 - `tools/fake_llm.py`：本地假模型（OpenAI 兼容，仅验收用，不参与产品逻辑）
 
 ## 关键设计
@@ -63,6 +72,12 @@ FastAPI + aiosqlite + sse-starlette + httpx + LangGraph。当前进度：**B4 �
 | 同步 `interrupt()` 用不了 | Python 3.10 没有 `asyncio.create_task(context=...)`，langchain-core 的 config contextvar 进不去异步节点，官方 `interrupt()` 必抛 `Called get_config outside of a runnable context`。改为抛 `HumanPause` 暂停 + `aupdate_state` 灌回 state + `ainvoke(None)` 从检查点续跑；用 `run.state.human_pending` 判断续跑的是哪个节点，节点重入时不重复发 `node_started` |
 | 图状态与我方 state 两套 | 图里只有一个字段 `data`（R1 起的 state 字典），节点原地改这个 dict 并返回它；每步都 `write_state` 落 `runs.state_json`，checkpoint 只负责「执行位置」。两套都写，回放与续跑各取所需 |
 | 推理模型正文为空 | `delta.content` 之外还有 `reasoning_content`（deepseek-flash 实测会先吐思维链）：现在单独透出（token 帧的 `reasoning`）、照样计费，节点完成事件带 `reasoningChars` 与 `finishReason`；正文为空时按「思维链吃满预算」或「`finish_reason=length` 截断」两种成因给不同 `emptyAnswer` + `hint` |
+| MCP 在 Windows 上起不来子进程 | `asyncio.create_subprocess_exec` 在 uvicorn 的 SelectorEventLoop 上直接 `NotImplementedError`；改成同步 `Popen` + 线程 + `to_thread`，超时用 `threading.Timer` kill 进程，并把 stderr 末 3 行拼进错误 |
+| MCP 配置错误不该是 500 | 探测/试跑是「配置期」操作，失败回 200 + `ok:false` + 错误码，前端才能就地提示；只有节点执行期失败才让 run 挂掉 |
+| 知识库检索不引模型 | BM25 就是零成本基线：中文按字符 bigram、英文按词；`rerank=MMR` 只做去冗余（相关性 − 与已选块的 Jaccard）。`embedding_model` 字段已留，向量检索后置 |
+| 子流程会污染父 run | 内联执行时 `run_id` 置空（事件总线只发临时事件、不写 `run_events`），并用 `MemorySaver` 而非共享 checkpointer；子流程不落 `runs` 表，token/cost 由父节点累加 |
+| 子流程无限套娃/卡审批 | 深度上限 3 层、`flow_id == 当前 flow` 直接 `SKILL_RECURSION`、子流程含 `human` 直接 `SKILL_HUMAN_UNSUPPORTED`（父 run 无法替子流程接审批） |
+| 删知识库文档报外键错 | `kb_chunks` 引用 `kb_documents`，必须先删块再删文档；删完重算 `docCount/chunkCount` |
 
 ## 本地启动
 
@@ -85,7 +100,7 @@ Swagger: http://localhost:8000/docs
 ## 测试
 
 ```bash
-.venv\Scripts\python.exe -m pytest      # 54 passed
+.venv\Scripts\python.exe -m pytest      # 66 passed（约 24s；连跑 4 次稳定）
 ```
 
 覆盖：Flow 版本语义与校验、节点配置校验、节点 Schema 导出、Key 脱敏与优先级、
@@ -95,7 +110,10 @@ SSE 到终态、筛选、节点统计、取消、审批续跑、序号恢复、�
 幂等命中、tool 节点真执行并落调用记录、工具不存在失败、**FC 两轮回路**、FC 逐轮计步、两次 run 的 state 隔离、
 **图引擎线性执行**、条件分支只走一条、表达式变量缺失报错、有界循环跑满/退出条件提前退出、
 **human 暂停后从 checkpoint 续跑且不重复 node_started**、取消不被后台任务改写、
-思维链吃满预算的空回答提示、`finish_reason=length` 截断的空回答提示。
+思维链吃满预算的空回答提示、`finish_reason=length` 截断的空回答提示、
+**MCP 真起子进程探测 + 调用（add=42）**、spawn 失败回错误码、mcp 节点发 `tool_call(source=mcp)`、空 server 配置失败、停用 Server 运行期被拒、
+**知识库切块/BM25 排序/MMR**、空库 hint、knowledge 节点注入 `context`、删文档重算计数、
+**子流程 outputs 合并 + tokens 计入父 run**、自递归被拦、含 human 子流程被拒。
 
 ## 下一步
 
@@ -103,5 +121,5 @@ SSE 到终态、筛选、节点统计、取消、审批续跑、序号恢复、�
 |---|---|
 | B3 ✅ | 工具注册表：FC 工具 CRUD、超时、重试、幂等、真 Function Calling |
 | B4 ✅ | LangGraph 图执行器：条件边、有界循环、checkpointer 中断续跑 |
-| B5 | MCP 客户端、RAG 知识库、skill 子流程 |
+| B5 ✅ | MCP stdio 客户端 / 知识库切块 + BM25/MMR / skill 子流程内联 |
 | B6 | 评测体系（三层采集器 / pass^k / judge / 门禁）与 Docker |

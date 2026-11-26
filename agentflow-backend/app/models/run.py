@@ -9,6 +9,8 @@ from app.models.flow import CamelModel
 EventType = Literal[
     "run_started", "node_started", "node_completed",
     "token", "tool_call", "tool_result",
+    # R5：知识库检索命中（hits / topScore / tookMs），前端日志里单独标一条
+    "knowledge_retrieved",
     "human_required", "run_completed", "run_failed",
 ]
 

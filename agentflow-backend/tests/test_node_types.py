@@ -17,12 +17,11 @@ async def test_node_types_exposes_all_node_schemas(client):
     assert llm["defaultConfig"]["model"] == ""
     assert llm["implemented"] is True
 
-    # 尚未执行的节点要自报状态，别让界面假装能用（R4 起 condition/loop 已由 LangGraph 接管）
-    assert types["mcp"]["implemented"] is False
-    assert types["skill"]["implemented"] is False
-    assert types["knowledge"]["implemented"] is False
-    assert types["condition"]["implemented"] is True
-    assert types["loop"]["implemented"] is True
+    # 11 类节点的执行语义都已实装（R5 收掉 mcp/skill/knowledge 的占位）
+    for node_type in ("mcp", "skill", "knowledge", "condition", "loop"):
+        assert types[node_type]["implemented"] is True, node_type
+    assert types["mcp"]["configSchema"]["properties"]["args_template"]["title"] == "参数模板"
+    assert types["knowledge"]["configSchema"]["properties"]["top_k"]["maximum"] == 20
 
     assert data["engine"] in {"graph", "loop"}  # 测试夹具把引擎锁成 loop，默认是 graph
     assert {"graph", "loop", "demo"} <= set(data["engines"])

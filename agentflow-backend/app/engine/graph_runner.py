@@ -28,7 +28,7 @@ from langgraph.errors import GraphRecursionError
 from langgraph.graph import END, START, StateGraph
 
 from app.config import settings
-from app.engine import expr
+from app.engine import extra_nodes, expr
 from app.engine.common import (
     DEFAULT_STATE,
     dump_state,
@@ -46,7 +46,8 @@ from app.services.llm import LLMConfig, LLMError
 from app.services.run_repo import load_run, update_run
 
 ENGINE_NAME = "langgraph"
-PLACEHOLDER_NODES = {"mcp", "skill", "knowledge"}
+# R5 起三类外部资源节点都已实装；这里保留一个空集合，是为了让「占位语义」的扩展点不消失
+PLACEHOLDER_NODES: set[str] = set()
 _CONDITIONAL_TYPES = {"condition", "loop"}
 
 
@@ -97,7 +98,10 @@ def build_graph(
     llm_config: LLMConfig | None,
     limit: int,
     resume_node: str | None = None,
+    emit_events: bool = True,
+    persist_state: bool = True,
 ) -> StateGraph:
+    """emit_events / persist_state 默认都开；子流程内联执行时两个都关（见 engine/subflow.py）。"""
     graph = StateGraph(GraphState)
     nodes = {node.id: node for node in flow.nodes}
 
@@ -118,6 +122,8 @@ def build_graph(
                 llm_config=llm_config,
                 limit=limit,
                 resume_node=resume_node,
+                emit_events=emit_events,
+                persist_state=persist_state,
             ),
         )
 
@@ -180,6 +186,8 @@ def _make_node_action(
     llm_config: LLMConfig | None,
     limit: int,
     resume_node: str | None = None,
+    emit_events: bool = True,
+    persist_state: bool = True,
 ):
     """把一类节点包成「发事件 → 执行 → 写 state → 发事件」的图节点。
 
@@ -193,16 +201,19 @@ def _make_node_action(
     async def action(state: GraphState) -> dict:
         data = state["data"]
         resuming_human = node.type == "human" and node.id == resume_node
+        emit = extra_nodes.make_emitter(run_id, emit_events)
 
         if stop.is_set():
             raise GraphCancelled()
 
         if not resuming_human:
-            await event_bus.emit(
-                run_id, "node_started", node.id, node_summary(node.type, node.config)
-            )
+            if emit_events:
+                await event_bus.emit(
+                    run_id, "node_started", node.id, node_summary(node.type, node.config)
+                )
             data["current_node"] = node.id
-            await write_state(run_id, data)
+            if persist_state:
+                await write_state(run_id, data)
             await pause(stop, max(settings.DEMO_STEP_DELAY, 0.0))
             if stop.is_set():
                 raise GraphCancelled()
@@ -281,14 +292,16 @@ def _make_node_action(
             timeout = node.config.get("timeout", 300)
             if not resuming_human:
                 data["human_pending"] = node.id
-                await write_state(run_id, data)
-                await update_run(run_id, status=RunStatus.WAITING_HUMAN.value)
-                await event_bus.emit(
-                    run_id,
-                    "human_required",
-                    node.id,
-                    {"message": message, "timeout_s": timeout, "engine": ENGINE_NAME},
-                )
+                if persist_state:
+                    await write_state(run_id, data)
+                    await update_run(run_id, status=RunStatus.WAITING_HUMAN.value)
+                if emit_events:
+                    await event_bus.emit(
+                        run_id,
+                        "human_required",
+                        node.id,
+                        {"message": message, "timeout_s": timeout, "engine": ENGINE_NAME},
+                    )
                 # 抛出后这一 superstep 作废，checkpoint 里 human_1 仍是「待执行」；
                 # 续跑时 aupdate_state 写回批复标记，再 ainvoke(None) 会重入这个节点
                 raise HumanPause(node.id)
@@ -297,6 +310,19 @@ def _make_node_action(
             data["human_pending"] = None
             data["variables"]["approved"] = approved
             completed["approved"] = approved
+
+        elif node.type == "mcp":
+            result = await extra_nodes.run_mcp_node(node, data, emit=emit)
+            data["variables"]["result"] = result
+            completed["result"] = result
+
+        elif node.type == "knowledge":
+            completed.update(await extra_nodes.run_knowledge_node(node, data, emit=emit))
+
+        elif node.type == "skill":
+            completed.update(
+                await extra_nodes.run_skill_node(node, data, stop=stop, llm_config=llm_config)
+            )
 
         elif node.type in PLACEHOLDER_NODES:
             completed.update(
@@ -307,8 +333,10 @@ def _make_node_action(
             )
 
         data["current_node"] = None
-        await write_state(run_id, data)
-        await event_bus.emit(run_id, "node_completed", node.id, completed)
+        if persist_state:
+            await write_state(run_id, data)
+        if emit_events:
+            await event_bus.emit(run_id, "node_completed", node.id, completed)
         return {"data": data}
 
     return action
@@ -324,6 +352,7 @@ async def run_graph(
 ) -> None:
     data = copy.deepcopy(DEFAULT_STATE)
     data["variables"] = {**(data.get("variables") or {}), **inputs}
+    data["flow_id"] = flow.id
 
     await update_run(
         run_id,
@@ -353,6 +382,7 @@ async def resume_graph(run_id: str, flow: Flow, *, stop: asyncio.Event) -> None:
     data = copy.deepcopy(run.state or copy.deepcopy(DEFAULT_STATE))
     data.setdefault("variables", {})
     data.setdefault("outputs", {})
+    data["flow_id"] = flow.id
     # API 只在 approved=True 时才会走到这里（拒绝走 cancel），这里显式记一笔给 human 节点读
     data["human_approved"] = True
 
@@ -487,6 +517,9 @@ async def _fail(run_id: str, data: dict, exc: Exception) -> None:
             "可先在工具管理里试跑该工具确认参数与超时设置）"
         )
         extra = {"code": code, "nodeId": node_id, "toolError": True}
+    elif isinstance(exc, extra_nodes.NodeError):
+        message = str(exc)
+        extra = {"code": exc.code, "nodeId": node_id}
     else:
         message = f"{type(exc).__name__}: {exc}"
         extra = {}

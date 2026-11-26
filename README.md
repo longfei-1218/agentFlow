@@ -2,8 +2,8 @@
 
 Web 端 Agent 编排平台（本地单用户原型）：画布拖拽定义执行拓扑 → 右侧配置参数 → 运行并实时观测 token / 工具调用 / 中间结果 → 用评测集做回归。
 
-**当前进度：R4 完成**（LangGraph 图执行器：条件边分支、有界循环、checkpointer 中断续跑）。
-下一步 R5：MCP + RAG + Skill（MCP 客户端、知识库检索、子流程调用）。
+**当前进度：R5 完成**（MCP stdio 客户端、知识库 BM25 检索、子流程内联）。
+下一步 R6：评测体系 + Docker 部署 + 评测页。
 
 ---
 
@@ -19,6 +19,10 @@ docs/
 agentflow-backend/                    FastAPI + SQLite + SSE 后端
   app/nodes/registry.py               11 类节点的配置模型（JSON Schema 的唯一定义处）
   app/engine/loop.py                  手写 Agent Loop（真调模型 + MAX_STEPS 守卫）
+  app/engine/extra_nodes.py           MCP / 知识 / 子流程三类节点
+  app/services/mcp_client.py           MCP stdio 客户端（Popen + JSON-RPC）
+  app/services/knowledge_rag.py        切块 + BM25 + MMR
+  scripts/mcp_demo_server.py           最小 MCP stdio server（echo/add/now）
   tools/fake_llm.py                   本地假模型（OpenAI 兼容，仅离线验收用）
 agentflow-frontend/                   React + TS + Vite + React Flow 前端
 ```
@@ -169,12 +173,39 @@ HTTP 工具的关键字段：`URL`（可含 `{{参数}}`）、`Headers`（JSON�
 
 ---
 
+## 扩展能力（R5）
+
+三类新节点都能在任何流程里直接拖：**MCP**、**子流程（skill）**、**知识（knowledge）**；图引擎与手写 Loop 都支持。
+
+**MCP 服务页 `/mcp`**
+
+1. 注册一个 **stdio** MCP Server：填 `命令`（如 `.venv\Scripts\python.exe`）和 `参数`（JSON 数组，如 `["scripts\mcp_demo_server.py"]`），超时按秒。
+2. 点「探测工具」→ 后端起进程走 `initialize → tools/list`，列出工具名与参数 Schema；失败会回错误码（`MCP_SPAWN_FAILED` / `MCP_TIMEOUT` / `MCP_SERVER_EXITED` …），不会 500。
+3. 选一个工具、按 Schema 填参数 JSON → 「试跑」直接看到 `tools/call` 结果。仓库自带的 `scripts/mcp_demo_server.py` 有 `echo / add / now`，纯标准库，不联网。
+4. 编辑器里拖 **MCP 节点** → 配置面板是下拉：先选 Server，再选工具（探测过的 Server 才有工具下拉，失败可手填）→ 参数模板支持 `{{变量}}`。运行时日志出现 `tool_call(source:"mcp")` → `tool_result`。
+
+**知识库页 `/knowledge`**
+
+1. 新建知识库（chunkSize / overlap），加文档（标题 + 正文）。后端按句切块，长句带 overlap 硬切；`docCount / chunkCount` 实时回写。
+2. 召回测试：填 query、topK，可选 **MMR 重排**（零成本去冗余，不调模型）。结果给出分数、片段、耗时与 hint。
+3. 编辑器里拖 **知识节点** → 选知识库、写检索 Query（默认 `{{query}}`）→ 节点把命中片段拼成 `context`、引用写 `citations`，下游模板里用 `{{context}}` 引用；日志里出现青色 `knowledge_retrieved`。
+
+> 当前是 **BM25 关键词检索**：中文按字符 bigram、英文按词，不是向量检索。同义改写召回弱于原词命中，`embedding_model` 字段留给后续版本。
+
+**子流程（skill）**
+
+- 子流程节点选一个**已保存**的流程，填 `inputs_template`（JSON，支持 `{{变量}}`）。
+- 执行是**内联**的：子流程不建 run、不发事件、不写检查点；它的 `outputs` 合并回父变量，tokens/cost 累加进父 run，节点完成事件带 `skillFlow / skillFlowName / depth / tokens`。子流程内部完成的模型调用记在它自己的 `steps` 上，**不占父 run 的 8 步上限**（父子各自受 `MAX_STEPS` 约束）。
+- 限制：嵌套最多 3 层、不能指向自己（`SKILL_RECURSION`）、子流程里不能有 `human`（`SKILL_HUMAN_UNSUPPORTED`，父 run 接不了子流程的审批）。
+
+---
+
 ## 验证
 
 ```powershell
-# 后端：54 个用例。覆盖 Flow 版本语义/SSE 终态/取消/审批续跑、节点 Schema、Key 脱敏、MAX_STEPS、
+# 后端：66 个用例。覆盖 Flow 版本语义/SSE 终态/取消/审批续跑、节点 Schema、Key 脱敏、MAX_STEPS、
 # 模型名不匹配的可读报错、并发保存乐观锁、工具 CRUD/重试/幂等/FC 回路、图引擎的条件分支/有界循环/检查点续跑、
-# 空回答诊断（思维链 vs length 截断）
+# 空回答诊断（思维链 vs length 截断）、MCP 探测/调用与失败码、知识库切块/检索/MMR、子流程合并与递归/深度拦截
 cd agentflow-backend
 .venv\Scripts\python.exe -m pytest
 
@@ -202,7 +233,12 @@ npm run build
 | 运行 500 且 error 里是 `模型接口返回 4xx` | Base URL 少了 `/v1`、Key 无效、模型名不存在 |
 | 报错说「你传了 gpt-4o-mini，但网关只支持 X」 | **节点里写死了模型名**，节点级模型优先于系统设置。打开编辑器选中该「模型」节点，点红字「点此改为跟随系统默认」即可；新建流程默认已留空 |
 | 明明改好了、再运行又变回旧配置 | 是**旧标签页**把它覆盖回去了。现在 `PUT` 带 `baseUpdatedAt`，过期会被 409 `FLOW_STALE` 拒绝并自动重载；界面还显示旧值就按 `Ctrl+R` 刷新 |
-| 改了后端代码但行为没变 | `--reload` 在这台机器上偶发不生效（日志有 `Reloading` 但子进程没换），手动重启后端 |
+| 改了后端代码但行为没变 | `--reload` 在这台机器上偶发不生效（日志有 `Reloading` 但子进程没换），手动重启后端。R5 就踩过一次：`mcp_client.py` 已改成线程版，探针却仍报旧的 `NotImplementedError` |
+| MCP 探测报 `MCP_SPAWN_FAILED` | 命令不在 PATH 或路径写错。Windows 上建议直接填绝对路径（如 `E:\...\agentflow-backend\.venv\Scripts\python.exe`），参数用 JSON 数组 |
+| MCP 探测报 `MCP_TIMEOUT` | Server 起得来但不在超时内应答 `initialize`。先单独在终端跑 `python scripts\mcp_demo_server.py` 确认它不报错，再调大超时 |
+| MCP 探测报 `MCP_SERVER_EXITED` | 进程启动后立刻退出，错误里带它最后几行 stderr；多半是参数路径不对或脚本自己崩了 |
+| 知识库搜不到想要的 | 当前是 BM25 关键词检索，换个更贴近原文的说法；中文按字符 bigram，别用大段同义改写。也可能是 chunk 太大（一篇只切出 1 块），调小 chunkSize 重加文档 |
+| 子流程跑不起来 | 多半是 `SKILL_RECURSION`（指向自己）、`SKILL_DEPTH_EXCEEDED`（超过 3 层）或 `SKILL_HUMAN_UNSUPPORTED`（子流程含人工节点）；子流程改完要先保存，父流程跑的是**当前保存的 DSL** |
 | 前端页面能开但接口 502 / 一直转圈到超时 | ①后端没起或没监听 8000；②代理走了 `::1`（见上文说明） |
 | 8000 端口显示在监听、但所有请求都超时 | 僵死的 reloader 占着端口、子进程已挂。按命令行找出并杀掉：`Get-CimInstance Win32_Process -Filter "Name='python.exe'" \| Select ProcessId,CommandLine` |
 | 端口被占 | `Get-NetTCPConnection -LocalPort 8000` 查进程，`Stop-Process -Id <pid>` |
@@ -210,22 +246,21 @@ npm run build
 
 ---
 
-## 两端启动后的最小闭环（3 分钟）
+## 两端启动后的最小闭环（约 5 分钟）
 
 1. `http://localhost:5173/flows` → 右上「模型设置」→ 填 Base URL / Key / 模型 → 「测试连接」通过 → 保存。顶部黄色「未配置模型」消失。
-2. 右上「新建流程」→ 自动生成 `input → llm → output`。左侧节点库的 11 类节点由后端 Schema 下发；`工具` / `分支` / `循环` / `人工` 已可真执行，mcp / 子流程 / 知识 仍带「占位」标。
+2. 右上「新建流程」→ 自动生成 `input → llm → output`。左侧节点库的 11 类节点由后端 Schema 下发，**全部已实装**（mcp / 子流程 / 知识不再带「占位」标）。
 3. 编辑器里改 System Prompt，停手约 1 秒 → 顶部 `v1` **不变**（草稿自动保存不动 version）；点「发布」→ 变 `v2`。
 4. 点「运行」→ 底部抽屉逐块滚出**真实模型**的 token（`node_completed` 里带 `usage`），顶部显示「模型调用 1/8」。
 5. 切「指标成本」→ Token 用量与节点表合计一致；点「刷新指标」拉 `GET /api/runs/:id/stats`。
 6. 打开「运行历史」→ 按流程筛选 → 点「回放」看到完整事件时序、节点耗时、终态不转圈。
 7. 想让审批卡出现：画一条 `input → human → output`，运行后状态变「等待审批」，点「批准并续跑」→ 变「成功」。
 8. 想让工具事件出现：`/tools` 新建内置 `echo` → 试跑一次 → 在流程里加 tool 节点选它（参数模板 `{"text":"{{query}}"}`），或在 llm 节点「绑定工具」里勾上它 → 运行时日志出现 `tool_call` / `tool_result`。
-
----
-
-8. 想让工具事件出现：`/tools` 新建内置 `echo` → 试跑一次 → 在流程里加 tool 节点选它（参数模板 `{"text":"{{query}}"}`），或在 llm 节点「绑定工具」里勾上它 → 运行时日志出现 `tool_call` / `tool_result`。
 9. 想让分支真的分叉：在「分支」节点右侧的**真/假锚点**分别拉线到两个下游节点，选中节点后在「分支连线」确认归属 → 运行一次，日志里只会看到一个分支的 `node_started`。
 10. 想让循环转起来：`input → 循环(body) → 模板 → 模型 → 回到循环`，循环节点 `done` 锚点连到出口 → 运行，日志里 `loop_1` 会按轮次重复出现，模型调用数等于轮次。
+11. 想让 MCP 出现：`/mcp` 注册 `scripts\mcp_demo_server.py`（命令填 venv 的 `python.exe`，参数填脚本绝对路径）→ 探测出 `echo/add/now` → 流程里 `input → MCP(now) → output(result)` → 运行，日志出现 `tool_call(source:"mcp")` 与 `latencyMs`。
+12. 想让知识库出现：`/knowledge` 新建库 → 加两段文档 → 召回测试填原词能命中 → 流程里 `input → 知识 → 模板(引用 {{context}}) → 模型 → output` → 运行，日志先出 `knowledge_retrieved`，回答能对上资料并带引用。
+13. 想让子流程出现：先保存一个 `input → 模板 → 模型 → output` 的小流程 → 父流程拖 **子流程节点** 选它、入参模板 `{"query":"{{query}}"}` → 运行，子流程不单独出现在运行历史，但父 run 的 `node_completed` 带 `skillFlow/depth/tokens`，token 已累加。
 
 ---
 
@@ -242,5 +277,6 @@ npm run build
 | **R1 ✅** | Flow CRUD + 版本语义、SSE、取消/续跑、测试基座 | 发布/问题面板、流式输出、指标、历史筛选、回放 |
 | **R2 ✅** | 节点 Schema 注册表、`/api/settings/llm`、OpenAI 兼容流式、手写 Agent Loop + `MAX_STEPS` 守卫 | 节点库/配置面板改吃后端 Schema、模型设置弹层、未配置拦截与引导、节点数 vs 模型调用数拆分 |
 | **R3 ✅** | 工具注册表（HTTP + 内置 echo/now/calc）、超时/重试/幂等、llm 节点真 Function Calling | 工具管理页（注册/试跑/调用记录）、tool 节点工具下拉、llm 节点「绑定工具」勾选 |
-| R4 ✅ | LangGraph 图执行器：条件边、有界循环、checkpointer 中断续跑（替代手写循环，保留 loop 做对照） | 分支/循环节点的双出口锚点与「分支连线」下拉、顶栏引擎标识、空回答（思维链吃满预算）警告 || R5 | MCP + RAG + Skill | 知识库页 |
+| **R4 ✅** | LangGraph 图执行器：条件边、有界循环、checkpointer 中断续跑（替代手写循环，保留 loop 做对照） | 分支/循环节点的双出口锚点与「分支连线」下拉、顶栏引擎标识、空回答（思维链吃满预算）警告 |
+| **R5 ✅** | MCP stdio 客户端、知识库切块 + BM25/MMR、skill 子流程内联；三类节点在图/手写引擎都可用 | MCP 服务页（注册/探测/试跑）、知识库页（文档/召回）、配置面板三处引用选择器、`knowledge_retrieved` 事件 |
 | R6 | 评测体系 + Docker | 评测页 |

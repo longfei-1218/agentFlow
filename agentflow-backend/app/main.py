@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from app.api import flows, nodes, runs, settings as settings_api, tools
+from app.api import flows, knowledge, mcp, nodes, runs, settings as settings_api, tools
 from app.config import settings
 from app.database import db, init_db
 from app.services.run_manager import run_manager
@@ -37,6 +37,8 @@ app.include_router(runs.router, prefix="/api")
 app.include_router(nodes.router, prefix="/api")
 app.include_router(settings_api.router, prefix="/api")
 app.include_router(tools.router, prefix="/api")
+app.include_router(mcp.router, prefix="/api")
+app.include_router(knowledge.router, prefix="/api")
 
 
 @app.exception_handler(HTTPException)

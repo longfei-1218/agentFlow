@@ -354,11 +354,115 @@ Invoke-RestMethod -Uri http://127.0.0.1:8000/api/flows/flow_1c485778/run -Method
 - **并行分支暂不支持**：一个普通节点连多条出边会 fan-out，两条分支共享同一份 state 会互相覆盖。当前用条件边做互斥分支是安全的；真正的并行扇出留到 R5。
 - **推理模型**：`deepseek-flash` 实测会先输出思维链（`run_15dfce1b` 里 381 个 `reasoning` 帧、136 字），`completionTokens` 被它吃掉时正文就是空串——`run_78d8d9da` 把 `max_tokens=128` 恰好用完、正文为空，调大后正常。现在节点完成事件带 `reasoningChars` 与 `finishReason`，token 帧带 `reasoning`，输出页对空正文出警告条；两种成因（思维链吃满 / `length` 截断）提示文案不同，照着提示调 `Max tokens` 即可。
 - **依赖坑**：`pip install langgraph` 会把 `websockets` 顶到 16 并卸载 12，uvicorn 0.34 在 3.10 上随即起不来；同时 `langsmith` 声明需要 `websockets>=15`，pip 会报一条冲突警告（本项目不用 LangSmith tracing，忽略即可）。装完务必补一句 `pip install "websockets>=12,<13" "aiosqlite==0.21.0"`。
-- MCP / 子流程 / 知识库仍是 R5；`demo` 引擎保留给离线回归。
+- MCP / 子流程 / 知识库已在 R5 实装；`demo` 引擎保留给离线回归。
 
 ## R5 · MCP + RAG + Skill（B5） + 知识库页
 
-状态：待做。
+状态：**已完成**（MCP stdio 客户端 + 知识库切块/BM25/MMR + 子流程内联，4 条真实流程跑通真实网关）
+
+### 0. 这轮改了什么
+
+后端：
+- `app/models/mcp.py` / `app/services/mcp_repo.py`（新）：MCP Server 定义只允许 `stdio`（command/args/env/cwd/timeout/enabled），`mcp_servers.definition_json` 是唯一真相，name/command/enabled 只是冗余列。
+- `app/services/mcp_client.py`（新）：**同步 `subprocess.Popen` + 线程 + `asyncio.to_thread`** 实现 JSON-RPC 会话（`initialize` → `notifications/initialized` → `tools/list` / `tools/call`），`threading.Timer` 做 watchdog 超时 kill，stderr 后台线程收集末 3 行拼进错误。**不能用 `asyncio.create_subprocess_exec`**：Windows + uvicorn 的 SelectorEventLoop 会直接 `NotImplementedError`。
+- `app/api/mcp.py`（新）：`/api/mcp-servers` CRUD + `GET /{id}/tools`（探测）+ `POST /{id}/call`（试跑）。探测/试跑失败也回 **200 + `ok:false` + 错误码**，前端不用靠 500 猜原因。
+- `app/models/knowledge.py` / `app/services/knowledge_repo.py` / `app/services/knowledge_rag.py`（新）：知识库与文档 CRUD、切块（按句切 → 按字数打包 → 超长句带 overlap 硬切）、中文按**字符 bigram**、英文按词、BM25（k1=1.2 / b=0.75）、可选 MMR 去冗余（0.7 相关性 − 0.3 与已选片段的 Jaccard）。空库/无命中都带可执行的 `hint`；全零分不硬凑结果。
+- `app/engine/extra_nodes.py`（新）：`run_mcp_node`（发 `tool_call` / `tool_result`，`source:"mcp"`，写 `variables.result`、`mcp_calls`）、`run_knowledge_node`（渲染 query 模板，写 `context` / `citations` / `knowledge_calls`，发 `knowledge_retrieved`）、`run_skill_node`（校验 flow_id、自递归、3 层深度、子流程含 human → 拒绝；`inputs_template` 插值；跑完把子流程 outputs 合并进父变量并写 `result` JSON）。
+- `app/engine/subflow.py`（新）：用 `MemorySaver` **内联编译**子流程（`emit_events=False, persist_state=False`），因此子流程不落 `runs` 表、不发 SSE、不占 run 名额；tokens/cost 回传给父节点累计。
+- `app/engine/graph_runner.py` / `app/engine/loop.py`：两种引擎都接上 mcp / knowledge / skill；`PLACEHOLDER_NODES` 清空（graph 侧只剩 condition/loop 的特判）；`extra_nodes.NodeError` 统一落 `run_failed` 并带 `code + nodeId`。
+- `app/services/event_bus.py`：`run_id` 为空时**只返回临时事件、不写 `run_events`、不推 SSE**——子流程复用节点实现的关键，否则外键校验直接失败。
+- `app/db/init.sql` + `app/database.py`：新增 `mcp_servers.definition_json`、`kb_documents`、`kb_chunks`（+ 索引），老库按 `PRAGMA table_info` 补列不删数据。
+- `app/nodes/registry.py` / `app/api/nodes.py`：mcp/skill/knowledge `implemented=true` 并补必填项；`/api/node-types` 多给 `mcpServersCount` / `knowledgeBasesCount`，配置面板据此显示「还没有可选项」。
+- `scripts/mcp_demo_server.py`（新）：纯标准库的最小 MCP stdio server（`echo` / `add` / `now`），联调和验收都用它，不依赖 npx/网络。
+
+前端：
+- `src/api/mcp.ts` / `src/api/knowledge.ts` / `src/store/mcpStore.ts` / `src/store/knowledgeStore.ts`（新）：类型与请求封装，探测结果按 serverId 缓存。
+- `src/pages/McpPage.tsx`（新）：左表右表单。注册/编辑（名称、命令、args JSON、超时、启用）、**探测工具**、工具下拉 + 参数 JSON 试跑（按 `inputSchema` 生成示例参数）、结果/错误码展示。
+- `src/pages/KnowledgePage.tsx`（重写）：新建知识库（chunkSize/overlap）、列表（docCount/chunkCount）、加文档（标题+正文，显示字数）、删文档、召回测试（query/topK/rerank，展示分数、片段、hint、引擎）。
+- `src/components/flow/ConfigPanel.tsx`：新增三个引用选择器——`MCPRefField`（server 下拉 + 探测后 tool 下拉，探测失败允许手填）、`KnowledgeRefField`（kb 下拉 + 空库引导）、`SkillRefField`（流程下拉、排除当前流程、显示版本）；三个模板字段（`args_template` / `query_template` / `inputs_template`）改用多行输入。
+- `src/components/layout/Sidebar.tsx` / `src/App.tsx`：资源组新增「MCP 服务」，挂 `/mcp` 路由。
+- `src/types/run.ts` / `src/components/flow/RunDrawer.tsx`：新增 `knowledge_retrieved` 事件与青色徽标。
+- `src/pages/ToolsPage.tsx`：底部卡片从「R5 未实装」改成「R5 已实装」并跳 `/mcp`。
+
+### A. 自动化
+
+```powershell
+cd agentflow-backend
+.venv\Scripts\python.exe -m pytest          # 66 passed（约 24s；54 + MCP 5 + 知识库 4 + 子流程 3）
+
+cd ..\agentflow-frontend
+node node_modules\typescript\bin\tsc --noEmit   # 无输出
+node node_modules\vite\bin\vite.js build        # ✓ built（仅 chunk>500kB 的既有告警）
+```
+
+| 用例 | 守的是什么 |
+|---|---|
+| `test_mcp.py`（5 条） | 真起子进程完成 `initialize/tools/list/tools/call`（`add 19+23=42`）；命令不存在时回 `MCP_SPAWN_FAILED` 而不是 500；流程里的 mcp 节点发 `tool_call/tool_result(source=mcp)` 并写 `result`；空 server_id 时 run 失败且带 `MCP_NOT_CONFIGURED`；**停用的 Server 运行期被拒**（「停用」开关不是摆设） |
+| `test_knowledge.py`（4 条） | 文档切块 + 检索排序（相关块排第一）+ rerank 不改变「有结果」的事实；空库搜索给可执行 hint；knowledge 节点把 `context/citations` 注入下游变量；删文档后 `docCount/chunkCount` 重算 |
+| `test_skill.py`（3 条） | 子流程 outputs 合并进父变量且 tokens 计入父 run；flow_id 指向自己时被 `SKILL_RECURSION` 拦下；子流程含 `human` 被 `SKILL_HUMAN_UNSUPPORTED` 拒绝 |
+| `test_node_types.py` / `test_graph.py` | mcp/skill/knowledge 的 `implemented` 翻成 true 后，Schema 与图引擎执行仍然一致 |
+| `tests/conftest.py` | 每用例重建 `db._write_lock` / `event_bus._lock` 并重置 SSE 全局状态，teardown 先 `run_manager.shutdown()` 再关库——修掉跨用例「Lock bound to a different event loop」与僵尸 run |
+
+### B. 页面验收（**先看这节：打开哪个页面，验哪些功能**）
+
+本机库里已备好（可直接点，不用重建）：
+
+| 对象 | id | 内容 |
+|---|---|---|
+| MCP Server | `mcp_20261126_153603b785` | `demo-mcp`：venv python 跑 `scripts/mcp_demo_server.py`，tools = echo/add/now，timeout 20s |
+| 知识库 | `kb_20261126_154242d719` | `售后知识库`：chunk 300 / overlap 40，3 篇文档（退款政策、发票说明、配送说明），3 chunks |
+| 流程 | `flow_03b8009e` | `R5 MCP 直连演示`：input → mcp(now) → output(result) |
+| 流程 | `flow_3fc2aca8` | `R5 知识库问答演示`：input → knowledge({{query}}, top3, rerank) → prompt(资料+问题) → llm(0.2/512) → output(text) |
+| 流程 | `flow_47c506fe` | `R5 子流程-润色`：input → prompt(改客服口吻) → llm → output(text) |
+| 流程 | `flow_9ef0ee08` | `R5 子流程调用演示`：input → skill(调上面的润色) → output(text,result) |
+
+| # | 打开哪个页面 | 做什么 | 期望 | 本轮实测 |
+|---|---|---|---|---|
+| 1 | `http://127.0.0.1:5173/mcp` | 看左侧列表 | 有 `demo-mcp`：命令是 `.venv\Scripts\python.exe`，参数指向 `scripts\mcp_demo_server.py`，超时 20，状态「启用」 | ✅ |
+| 2 | 同页选中 `demo-mcp` 点「探测工具」 | 看工具清单 | 出 `echo / add / now` 三个工具，各带描述与参数 Schema；探测耗时几百毫秒 | ✅ `ok=true`、374ms、3 个工具 |
+| 3 | 同页工具选 `add`，参数填 `{"a":19,"b":23}` 点「试跑」 | 看结果 | 返回 `42`；失败会显示错误码而不是 HTTP 500 | ✅ `ok=true`、result=42 |
+| 4 | 同页「注册 Server」新建一个测试项：命令填 `agentflow-not-a-command`，点探测（验完删掉） | 看错误 | 红色提示 `MCP_SPAWN_FAILED`，文案说「找不到命令，检查是否在 PATH」；HTTP 仍是 200，不是 500 | ✅ 实测同一文案 |
+| 5 | `http://127.0.0.1:5173/knowledge` | 选中「售后知识库」 | 文档 3 / 片段 3；三篇文档都在列表里，可删 | ✅ |
+| 6 | 同页底部「召回测试」填 `退款多久到账`、topK 3 | 看命中 | 第一条是「退款政策」片段，分数 `5.5097`，`tookMs=0`、`totalChunks=3`、引擎 `bm25` | ✅ 实测 1 条命中、5.5097 |
+| 7 | 同页勾上「MMR 重排」再搜一次 | 看结果 | 结果不空、顺序稳定；同义重复块会被压掉（本例只有 1 条命中，主要靠单测覆盖多块去冗余） | ✅ 接口返回 `rerank:true` |
+| 8 | 同页「添加文档」贴一段新内容 | 看计数 | `docCount/chunkCount` 立即 +1（长文按 300 字切多块）；删掉它计数回落 | 口径已由单测覆盖 |
+| 9 | `http://127.0.0.1:5173/flows/flow_03b8009e` | 选中 MCP 节点 | 配置面板是**下拉**：Server=`demo-mcp`、工具=`now`（点探测后才有工具选项）；参数模板 `{}` | ✅ |
+| 10 | 同页点「运行」 | 看实时日志与输出 | `tool_call(source:"mcp")` → `tool_result(ok:true, latencyMs≈380)`；输出是带 `iso/timestamp` 的 JSON；模型调用 0 次 | ✅ run_866d73a8：`latencyMs=381`、`iso=2026-11-26T23:43:22+0800` |
+| 11 | `http://127.0.0.1:5173/flows/flow_3fc2aca8` 点「运行」 | 看日志顺序 | `knowledge_retrieved`（kbId、query、hits、topScore、totalChunks）先出 → prompt → LLM → 输出；回答只依据资料并带 `[1]` 引用 | ✅ run_28684249：hits=1、topScore=5.5097、268 tokens；回答「微信 1–3 个工作日、银行卡最长 7 个工作日 [1]」 |
+| 12 | 同页把问题改成资料里没有的（如「你们支持开专票吗」） | 看回答 | 模型说「资料里没有」，不编。知识节点仍会返回 hint；**不会**因为没命中就硬塞假片段 | 口径由 BM25「零分不硬凑」+ hint 保证 |
+| 13 | `http://127.0.0.1:5173/flows/flow_47c506fe` 点「运行」 | 看输出 | 一句话客服口吻改写（子流程单独也能跑） | ✅ run_5ddf7b22：287 tokens |
+| 14 | `http://127.0.0.1:5173/flows/flow_9ef0ee08` | 选中「子流程」节点 | 配置面板是**流程下拉**：列出可选的已保存流程、**不含当前流程**、带版本号；入参模板 `{"query": "{{query}}"}` | ✅ |
+| 15 | 同页点「运行」 | 看日志与输出 | skill 节点只发一条 `node_completed`，payload 带 `skillFlow / skillFlowName / inputs / outputs / steps / tokens / cost / depth:1`；子流程的 `node_started` **不会**出现在父 run 的事件流里；父 run tokens = 子流程 tokens，但**父 run 的模型调用数仍是 0/8**（子流程的调用记在它自己的 steps 上） | ✅ run_15e557c9：depth=1、tokens=465、cost=0.00253、outputs.text 已合并为 `result`，父输出同时有 `text/result`、父 steps=0 |
+| 16 | 同页把子流程节点指向自己（或指到含 human 的流程）再运行 | 看失败原因 | `run_failed` 带 `SKILL_RECURSION` / `SKILL_HUMAN_UNSUPPORTED`，文案说清是哪种禁止 | 口径已由单测覆盖（下拉已排除自身，需用 API 构造） |
+| 17 | `http://127.0.0.1:5173/tools` | 拉到页面底部 | MCP 卡片写「R5 已实装」，点链接跳 `/mcp` | ✅ |
+| 18 | `http://127.0.0.1:8000/docs` | 接口自查 | `/api/mcp-servers`、`/api/mcp-servers/{id}/tools`、`/api/knowledge`、`/api/knowledge/{id}/search` 都在；`/api/node-types` 带 `mcpServersCount=1`、`knowledgeBasesCount=1` | ✅ |
+| 19 | `http://127.0.0.1:5173/mcp` 取消勾选 `demo-mcp` 的「启用」并保存 → 回 `flows/flow_03b8009e` 点运行（验完记得启用回来） | 看运行结果 | run 变成失败；`run_failed` 事件的 `payload.code = MCP_NOT_CONFIGURED`，`run.error` 文案是「已停用，先在 MCP 服务页启用」；**不会**偷偷调用 | ✅ run_b52a51bb：status=failed、payload.code=MCP_NOT_CONFIGURED、nodeId=mcp_1 |
+
+**最快只验后端**：
+
+```powershell
+$base="http://127.0.0.1:8000/api"
+# 1) 探测 + 试跑 MCP
+Invoke-RestMethod "$base/mcp-servers/mcp_20261126_153603b785/tools" | Select-Object ok,latencyMs,@{n="tools";e={$_.tools.name}}
+Invoke-RestMethod -Method Post -Uri "$base/mcp-servers/mcp_20261126_153603b785/call" -ContentType "application/json" -Body '{"toolName":"add","args":{"a":19,"b":23}}'
+# 2) 知识库召回
+Invoke-RestMethod -Method Post -Uri "$base/knowledge/kb_20261126_154242d719/search" -ContentType "application/json" -Body '{"query":"退款多久到账","topK":3,"rerank":true}' | Select-Object totalChunks,@{n="top";e={$_.hits[0].title}}
+# 3) 跑 MCP 流程 / 知识库流程 / 父子流程
+foreach($f in "flow_03b8009e","flow_3fc2aca8","flow_9ef0ee08"){
+  Invoke-RestMethod -Method Post -Uri "$base/flows/$f/run" -ContentType "application/json" -Body '{"inputs":{"query":"退款多久到账"}}'
+}
+```
+
+### C. 口径与已知说明
+
+- **MCP 只支持 stdio**：command/args 直接起本机进程，等价于「允许这台机器执行这条命令」。本地单用户原型可以接受；远程 URL / SSE transport 会明确回 `MCP_TRANSPORT_UNSUPPORTED`，留到 R6 之后。每次探测/调用都新起进程（没有长连接池），冷启动实测 300–400ms，所以 `latencyMs` 里包含进程启动时间。
+- **Windows 上的异步子进程坑**：`asyncio.create_subprocess_exec` 在 uvicorn 的 SelectorEventLoop 上必抛 `NotImplementedError`（`base_events._make_subprocess_transport`）。实现已改成同步 `Popen` 放线程里跑，超时用 `threading.Timer` kill，别改回去。
+- **知识库不是向量库**：当前是 BM25 关键词检索，中文按字符 bigram 切词（「退款」→「退款」+ 相邻二元组），所以同义改写（「钱什么时候回来」）召回弱于原词命中。`embedding_model` 字段已预留，向量检索留到 R6 之后；`rerank` 是**零成本 MMR 去冗余**，不是模型重排。
+- **切块参数影响观感**：默认 `chunk_size=400`；本次演示库用 300/40，三篇短文档各只切出 1 块，所以 `docCount=chunkCount=3`、召回只可能命中 1 条。想看多块排序，把文档写长一点或把 chunk 调到 120。
+- **子流程语义**：内联执行、不建 run、不发事件、不写 checkpointer（`MemorySaver` 只在本进程内存里）；tokens/cost 累加进父 run，`steps` 是子流程内部完成的模型调用数，**不计入父 run 的 steps**（父子各自受 `MAX_STEPS` 约束，父流程不会因为多套一层就绕过上限）。嵌套上限 3 层，自递归直接拒；子流程里出现 `human` 也拒（父 run 没法替子流程接审批）。子流程按**当前保存的 DSL** 编译，改了子流程记得保存后再跑父流程。
+- **事件协议只加不减**：新增 `knowledge_retrieved`；mcp 复用 `tool_call/tool_result` 并带 `source:"mcp"`；skill 复用 `node_completed` 并带 `skillFlow/depth/tokens`。前端 RunDrawer 靠这些字段展示，不需要新的抽屉。
+- **失败口径**：mcp / knowledge / skill 节点本身失败 → 整个 run 失败（`run_failed` 带错误码与 `nodeId`）；探测、试跑、召回这些「配置期」接口失败仍回 200 + `ok:false`，方便前端就地提示。
+- **`--reload` 又会骗人**：本轮改完 `mcp_client.py` 后探针仍报旧的 `NotImplementedError`，实际是 reloader 没换子进程。验收时若「代码明明改了但行为没变」，先按 README 的端口清理步骤杀掉 reloader + worker 再重启，别先怀疑实现。
 
 ## R6 · 评测与部署（B6） + 评测页
 

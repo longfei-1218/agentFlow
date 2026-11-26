@@ -1,4 +1,4 @@
-import { Activity, Database, FlaskConical, GitBranch, Wrench } from "lucide-react";
+import { Activity, Database, FlaskConical, GitBranch, Plug, Wrench } from "lucide-react";
 import { NavLink } from "react-router-dom";
 
 const groups = [
@@ -8,6 +8,7 @@ const groups = [
   ] },
   { title: "资源", items: [
     { to: "/tools", label: "工具管理", icon: Wrench },
+    { to: "/mcp", label: "MCP 服务", icon: Plug },
     { to: "/knowledge", label: "知识库", icon: Database },
   ] },
   { title: "质量", items: [

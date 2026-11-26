@@ -11,6 +11,7 @@ const badgeClass: Record<EventType, string> = {
   token: "badge-gray",
   tool_call: "badge-orange",
   tool_result: "badge-green",
+  knowledge_retrieved: "badge-cyan",
   human_required: "badge-purple",
   run_completed: "badge-green",
   run_failed: "badge-red",

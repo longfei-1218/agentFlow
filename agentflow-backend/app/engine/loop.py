@@ -13,6 +13,7 @@ from typing import Any
 import orjson
 
 from app.config import settings
+from app.engine import extra_nodes
 from app.engine.common import (
     DEFAULT_STATE,
     dump_state,
@@ -29,9 +30,9 @@ from app.services.event_bus import event_bus, utc_now
 from app.services.llm import LLMConfig, LLMError, stream_completion
 from app.services.run_repo import load_run, update_run
 
-# R3 已接管 tool；这几类节点的执行语义留到 R4/R5，先按直通占位处理，
-# 既不假装成功，也不让用户以为它们已经生效。
-PLACEHOLDER_NODES = {"condition", "loop", "mcp", "skill", "knowledge"}
+# 手写 loop 只支持线性拓扑：condition / loop 的语义在图引擎里，这里仍按直通占位。
+# mcp / skill / knowledge 在 R5 已实装，两个引擎共用 extra_nodes 里的实现。
+PLACEHOLDER_NODES = {"condition", "loop"}
 
 
 class StepLimitExceeded(RuntimeError):
@@ -73,6 +74,7 @@ async def run_loop(
     state = copy.deepcopy(DEFAULT_STATE)
     state.update(copy.deepcopy(resume_from or {}))
     state["variables"] = dict(state.get("variables") or {})
+    state["flow_id"] = flow.id
     order = topological_order(flow)
     node_map = {node.id: node for node in flow.nodes}
     delay = max(settings.DEMO_STEP_DELAY, 0.0)
@@ -171,6 +173,27 @@ async def run_loop(
                 result = await _run_tool_node(run_id, node, state)
                 state["variables"]["result"] = result
                 completed_payload = {"ok": True, "result": result}
+
+            elif node.type == "mcp":
+                emit = extra_nodes.make_emitter(run_id)
+                result = await extra_nodes.run_mcp_node(node, state, emit=emit)
+                state["variables"]["result"] = result
+                completed_payload = {"ok": True, "result": result}
+
+            elif node.type == "knowledge":
+                emit = extra_nodes.make_emitter(run_id)
+                completed_payload = {
+                    "ok": True,
+                    **await extra_nodes.run_knowledge_node(node, state, emit=emit),
+                }
+
+            elif node.type == "skill":
+                completed_payload = {
+                    "ok": True,
+                    **await extra_nodes.run_skill_node(
+                        node, state, stop=stop, llm_config=llm_config
+                    ),
+                }
 
             elif node.type in PLACEHOLDER_NODES:
                 completed_payload = {
@@ -274,6 +297,20 @@ async def run_loop(
             run_id,
             status=RunStatus.FAILED.value,
             error=message,
+            state_json=dump_state(state),
+            finished_at=utc_now(),
+        )
+    except extra_nodes.NodeError as exc:
+        node_id = state.get("current_node")
+        await event_bus.emit(
+            run_id,
+            "run_failed",
+            payload={"error": str(exc), "code": exc.code, "nodeId": node_id},
+        )
+        await update_run(
+            run_id,
+            status=RunStatus.FAILED.value,
+            error=str(exc),
             state_json=dump_state(state),
             finished_at=utc_now(),
         )

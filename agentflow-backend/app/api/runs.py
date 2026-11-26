@@ -198,6 +198,13 @@ async def resume_run(run_id: str, payload: dict | None = None):
         return await cancel_run(run_id)
 
     flow = await load_flow(run.flow_id)
+    # 暂停是「写库 + 抛异常收尾」两步：状态先变 waiting_human，执行任务可能还在退栈。
+    # 不等它退完就 launch 会撞上「同一 run 已有执行任务」。手动点得快就会复现，所以这里等一下。
+    if not await run_manager.wait(run_id, timeout=3):
+        raise HTTPException(
+            status_code=409,
+            detail="上一步暂停还在收尾，请稍等 1 秒再点「批准并续跑」",
+        )
     await update_run(run_id, status=RunStatus.RUNNING.value, error=None, finished_at=None)
     event_bus.seed_seq(run_id, await max_seq(run_id))
     stop = run_manager.cancel_token(run_id)

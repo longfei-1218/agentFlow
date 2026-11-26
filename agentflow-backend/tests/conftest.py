@@ -12,17 +12,46 @@ from app.services.llm import LLMDelta
 
 @pytest_asyncio.fixture
 async def client(tmp_path, monkeypatch):
+    from app.services.run_manager import run_manager
+
     await db.close()
     monkeypatch.setattr(settings, "DATABASE_PATH", str(tmp_path / "agentflow.db"))
     await db.connect()
     event_bus._seq.clear()
+    _reset_sse_status()
+    # 每个用例一个事件循环：上一条用例遗留的后台 run 任务会把 db/event_bus 的
+    # asyncio.Lock 绑死在旧 loop 上（只有发生过竞争才会绑定），下一条用例一争用就
+    # `bound to a different event loop`。所以先清任务，再换锁。
+    await run_manager.shutdown()
+    _reset_locks()
 
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
         yield http
 
+    # 必须在关库之前收尾：否则执行器会在「数据库尚未初始化」的异常里结束，
+    # 并在下一条用例里留下 active task 与旧 loop 的锁
+    await run_manager.shutdown()
     await db.close()
     event_bus._seq.clear()
+    _reset_sse_status()
+
+
+def _reset_locks() -> None:
+    import asyncio
+
+    db._write_lock = asyncio.Lock()
+    event_bus._lock = asyncio.Lock()
+
+
+def _reset_sse_status() -> None:
+    """sse_starlette 把 AppStatus.should_exit_event 放在类属性上，一旦某个用例用
+    `client.stream()` 连过 /events，它就被绑死在那个事件循环上；下一个用例换新 loop
+    再进 SSE 路由就会 `bound to a different event loop`。这里每个用例前后各清一次。
+    """
+    from sse_starlette.sse import AppStatus
+
+    AppStatus.should_exit_event = None
 
 
 @pytest.fixture(autouse=True)

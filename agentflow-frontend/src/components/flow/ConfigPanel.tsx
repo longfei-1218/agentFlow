@@ -1,13 +1,17 @@
-import { useEffect, useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Copy, Trash2 } from "lucide-react";
 import { Link } from "react-router-dom";
 import { z } from "zod";
+import { flowsApi } from "@/api/flows";
+import { mcpApi } from "@/api/mcp";
 import { useFlowStore } from "@/store/flowStore";
+import { useKnowledgeStore } from "@/store/knowledgeStore";
+import { useMcpStore } from "@/store/mcpStore";
 import { useNodeTypeStore } from "@/store/nodeTypeStore";
 import { useSettingsStore } from "@/store/settingsStore";
 import { useToolStore } from "@/store/toolStore";
 import { normalizeSchema, type NormalizedSchema, type SchemaProperty } from "@/utils/schema";
-import type { FlowNode } from "@/types/flow";
+import type { Flow, FlowNode } from "@/types/flow";
 
 /** tool 节点的工具选择：从注册表来，不给手填 id，避免写错一个字符到运行期才报错。 */
 function ToolRefField({ node }: { node: FlowNode }) {
@@ -91,6 +95,164 @@ function ToolBindField({ node }: { node: FlowNode }) {
       )}
       {value.length > 0 && <div className="mt-1 text-[11px] text-ink-3">已绑定 {value.length} 个 · 工具失败不会中断运行，错误会回给模型</div>}
     </div>
+  );
+}
+
+/** mcp 节点：Server 与工具都从注册表来，工具名先探测再选，避免手写错一个字符到运行期才报错。 */
+function MCPRefField({ node }: { node: FlowNode }) {
+  const servers = useMcpStore((s) => s.servers);
+  const tools = useMcpStore((s) => s.tools);
+  const loadServers = useMcpStore((s) => s.load);
+  const updateConfig = useFlowStore((s) => s.updateConfig);
+
+  const serverId = String(node.config.server_id ?? "");
+  const toolName = String(node.config.tool_name ?? "");
+  const knownTools = tools[serverId] ?? [];
+  const [probeError, setProbeError] = useState<string | null>(null);
+  const [probing, setProbing] = useState(false);
+
+  useEffect(() => {
+    void loadServers();
+  }, [loadServers]);
+
+  useEffect(() => {
+    setProbeError(null);
+    if (!serverId) return;
+    let cancelled = false;
+    setProbing(true);
+    mcpApi
+      .probe(serverId)
+      .then((result) => {
+        if (cancelled) return;
+        if (!result.ok) setProbeError(result.error || "探测失败");
+        else useMcpStore.setState((state) => ({ tools: { ...state.tools, [serverId]: result.tools } }));
+      })
+      .catch((error) => {
+        if (!cancelled) setProbeError(error instanceof Error ? error.message : "探测失败");
+      })
+      .finally(() => {
+        if (!cancelled) setProbing(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [serverId]);
+
+  const missing = toolName !== "" && knownTools.length > 0 && !knownTools.some((tool) => tool.name === toolName);
+
+  return (
+    <>
+      <label className="block mb-3">
+        <span className="block mb-1 text-[12px] text-ink-2">MCP Server</span>
+        <select className="field" value={serverId} onChange={(event) => updateConfig(node.id, { server_id: event.target.value, tool_name: "" })}>
+          <option value="">未选择（运行会失败）</option>
+          {servers.map((server) => (
+            <option key={server.id} value={server.id}>
+              {server.name}{server.enabled ? "" : "（已停用）"}
+            </option>
+          ))}
+        </select>
+        <div className="mt-1 text-[11px] text-ink-3">
+          {servers.length === 0 ? (
+            <>还没有 Server，先到 <Link className="text-primary hover:underline" to="/mcp">MCP 服务</Link> 注册并探测工具。</>
+          ) : probing ? (
+            "正在探测工具清单…"
+          ) : (
+            <>调用时每次都会重新 initialize 握手；工具清单来自 <Link className="text-primary hover:underline" to="/mcp">MCP 服务</Link> 的探测结果。</>
+          )}
+        </div>
+      </label>
+
+      <label className="block mb-3">
+        <span className="block mb-1 text-[12px] text-ink-2">工具名称</span>
+        {knownTools.length > 0 ? (
+          <select className="field" value={toolName} onChange={(event) => updateConfig(node.id, { tool_name: event.target.value })}>
+            <option value="">未选择（运行会失败）</option>
+            {knownTools.map((tool) => <option key={tool.name} value={tool.name}>{tool.name}</option>)}
+            {missing && <option value={toolName}>{toolName}（当前 Server 上没有）</option>}
+          </select>
+        ) : (
+          <input className="field font-mono" value={toolName} onChange={(event) => updateConfig(node.id, { tool_name: event.target.value })} placeholder="如 echo" />
+        )}
+        {probeError && <div className="mt-1 text-[11px] text-warn">探测失败：{probeError}（可以直接手填工具名）</div>}
+      </label>
+    </>
+  );
+}
+
+/** knowledge 节点：知识库从知识库页来，chunk 参数与检索口径都跟着库走。 */
+function KnowledgeRefField({ node }: { node: FlowNode }) {
+  const kbs = useKnowledgeStore((s) => s.kbs);
+  const loadKbs = useKnowledgeStore((s) => s.load);
+  const updateConfig = useFlowStore((s) => s.updateConfig);
+
+  useEffect(() => {
+    void loadKbs();
+  }, [loadKbs]);
+
+  const value = String(node.config.kb_id ?? "");
+  const missing = value !== "" && !kbs.some((kb) => kb.id === value);
+
+  return (
+    <label className="block mb-3">
+      <span className="block mb-1 text-[12px] text-ink-2">知识库</span>
+      <select className="field" value={value} onChange={(event) => updateConfig(node.id, { kb_id: event.target.value })}>
+        <option value="">未选择（运行会失败）</option>
+        {kbs.map((kb) => (
+          <option key={kb.id} value={kb.id}>{kb.name} · {kb.chunkCount} 块</option>
+        ))}
+        {missing && <option value={value}>{value}（知识库里不存在）</option>}
+      </select>
+      <div className="mt-1 text-[11px] text-ink-3">
+        {kbs.length === 0
+          ? <>还没有知识库，先去 <Link className="text-primary hover:underline" to="/knowledge">知识库</Link> 新建并添加文档。</>
+          : <>命中片段会拼成 <span className="font-mono">context</span> 变量，下游 prompt/llm 用 <span className="font-mono">{"{{context}}"}</span> 引用。</>}
+      </div>
+    </label>
+  );
+}
+
+/** skill 节点：子流程从流程列表里选，避免用户手抄 flow_id。 */
+function SkillRefField({ node }: { node: FlowNode }) {
+  const currentFlowId = useFlowStore((s) => s.flow.id);
+  const updateConfig = useFlowStore((s) => s.updateConfig);
+  const [flows, setFlows] = useState<Flow[]>([]);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    flowsApi
+      .list()
+      .then((items) => {
+        if (!cancelled) setFlows(items);
+      })
+      .catch((err) => {
+        if (!cancelled) setError(err instanceof Error ? err.message : "流程列表加载失败");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const value = String(node.config.flow_id ?? "");
+  const missing = value !== "" && !flows.some((flow) => flow.id === value);
+
+  return (
+    <label className="block mb-3">
+      <span className="block mb-1 text-[12px] text-ink-2">子流程</span>
+      <select className="field" value={value} onChange={(event) => updateConfig(node.id, { flow_id: event.target.value })}>
+        <option value="">未选择（运行会失败）</option>
+        {flows
+          .filter((flow) => flow.id !== currentFlowId)
+          .map((flow) => (
+            <option key={flow.id} value={flow.id}>{flow.name} · v{flow.version}</option>
+          ))}
+        {missing && <option value={value}>{value}（流程不存在）</option>}
+      </select>
+      <div className="mt-1 text-[11px] text-ink-3">
+        子流程内联执行、不落运行记录；嵌套上限 3 层，含 human 审批的子流程会被拒绝。{error && <span className="text-warn"> {error}</span>}
+      </div>
+    </label>
   );
 }
 
@@ -253,7 +415,10 @@ function FieldControl({
   const set = (next: unknown) => updateConfig(node.id, { [name]: next });
 
   const isLongText =
-    ["template", "system", "expression", "message", "exit_condition"].includes(name) ||
+    [
+      "template", "system", "expression", "message", "exit_condition",
+      "args_template", "query_template", "inputs_template",
+    ].includes(name) ||
     (prop.description?.length ?? 0) > 40 ||
     String(value ?? "").length > 60;
 
@@ -386,6 +551,11 @@ export function ConfigPanel() {
           if (spec.type === "llm" && name === "model") return <ModelField key={name} node={node} />;
           if (spec.type === "llm" && name === "tool_ids") return <ToolBindField key={name} node={node} />;
           if (spec.type === "tool" && name === "tool_id") return <ToolRefField key={name} node={node} />;
+          if (spec.type === "mcp" && name === "server_id") return <MCPRefField key={name} node={node} />;
+          // MCPRefField 已经把 server 与 tool 两个字段一起渲染，这里跳过 tool_name 避免重复
+          if (spec.type === "mcp" && name === "tool_name") return null;
+          if (spec.type === "knowledge" && name === "kb_id") return <KnowledgeRefField key={name} node={node} />;
+          if (spec.type === "skill" && name === "flow_id") return <SkillRefField key={name} node={node} />;
           return <FieldControl key={name} node={node} prop={prop} name={name} />;
         })}
 
