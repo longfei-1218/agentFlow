@@ -1,5 +1,5 @@
 """Run / RunEvent 契约：对齐技术文档 4.2 与 SSE 协议 7.2。"""
-from enum import StrEnum
+from enum import Enum
 from typing import Any, Literal
 
 from pydantic import Field
@@ -13,7 +13,9 @@ EventType = Literal[
 ]
 
 
-class RunStatus(StrEnum):
+class RunStatus(str, Enum):
+    """注意：不用 enum.StrEnum（3.11+），这里退成 str+Enum 以兼容 Python 3.10。"""
+
     PENDING = "pending"
     RUNNING = "running"
     WAITING_HUMAN = "waiting_human"

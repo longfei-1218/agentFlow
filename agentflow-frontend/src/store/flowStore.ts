@@ -22,6 +22,8 @@ interface FlowStore {
   validationErrors: ValidationIssue[];
   dirty: boolean;
   loading: boolean;
+  loadError: string | null;
+  lastSavedAt: string | null;
 
   loadFlow: (id: string) => Promise<void>;
   setFlow: (flow: Flow) => void;
@@ -37,6 +39,7 @@ interface FlowStore {
   setRuntime: (id: string, state: RuntimeState) => void;
   validate: () => Promise<boolean>;
   save: () => Promise<void>;
+  publish: () => Promise<void>;
   toCreatePayload: () => FlowCreate;
 }
 
@@ -47,15 +50,27 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
   validationErrors: [],
   dirty: false,
   loading: false,
+  loadError: null,
+  lastSavedAt: null,
 
   loadFlow: async (id) => {
-    set({ loading: true });
+    set({ loading: true, loadError: null });
     try {
       const flow = await flowsApi.get(id);
-      set({ flow, runtime: {}, selectedNodeId: null, validationErrors: [], dirty: false, loading: false });
+      set({
+        flow,
+        runtime: {},
+        selectedNodeId: null,
+        validationErrors: [],
+        dirty: false,
+        loading: false,
+        lastSavedAt: null,
+      });
     } catch (error) {
-      set({ loading: false });
-      throw error;
+      set({
+        loading: false,
+        loadError: error instanceof Error ? error.message : "流程加载失败",
+      });
     }
   },
 
@@ -192,7 +207,24 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
     const { flow } = get();
     if (!flow.id) return;
     const updated = await flowsApi.update(flow.id, get().toCreatePayload());
-    set({ flow: updated, dirty: false });
+    set({
+      flow: updated,
+      dirty: false,
+      lastSavedAt: new Date().toISOString(),
+    });
+  },
+
+  publish: async () => {
+    const { flow } = get();
+    if (!flow.id) return;
+    await get().save();
+    const published = await flowsApi.publish(flow.id);
+    set({
+      flow: published,
+      dirty: false,
+      validationErrors: [],
+      lastSavedAt: new Date().toISOString(),
+    });
   },
 
   toCreatePayload: () => {

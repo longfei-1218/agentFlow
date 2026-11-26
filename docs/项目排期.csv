@@ -1,0 +1,8 @@
+﻿轮次,后端,同一轮配的前端,联调验收点
+R1,B1 地基 ✅ 已完成,去掉草稿 hack、加「发布」按钮、422 detail 逐条渲染、/stats 接进抽屉指标、runs 按流程筛选、终态回放不再转圈、token 实时追加输出区（演示执行器已经在推 token 了）,改配置 v1 不变；发布变 v2；点停止 3 秒内变「已取消」
+R2,B2 执行引擎：/api/node-types + /api/settings/llm + loop.py,配置面板改成拉后端 Schema（删掉前端硬编码的 registry，消除漂移）、设置弹层填 key/base_url,填完 key 点运行能看到真实模型的流式 token 与成本
+R3,B3 工具层,工具管理页实装、tool 节点改下拉选工具,注册工具 → 节点选中 → 运行出 tool_call / tool_result
+R4,B4 LangGraph,审批 / 续跑状态机对齐、中断态 UI,重启后端后 waiting_human 的 run 仍能续跑
+R5,B5 MCP + RAG + Skill,知识库页实装、knowledge / skill 选择器,上传文档 → 召回测试出片段 → 流程内引用到答案
+R6,B6 评测 + Docker,评测页实装（门禁卡 / 直方图 / Pareto / 版本对比）,一键回归同屏出 pass^3 与一致性分布
+（内容由AI生成）

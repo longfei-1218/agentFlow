@@ -12,7 +12,12 @@ cd agentflow-backend
 
 ## R1 · 后端地基（B1） + 前端对接版本语义
 
-状态：**后端已完成，前端切片待做**
+状态：**已完成**（后端 + 前端切片，均已实测）
+
+### 0. 这轮改了什么
+
+后端：`RunManager`（真取消）、`state_json` 快照真续跑、`seq` 从库恢复、共享连接 + 写锁、`PUT` 不递增版本 + `/publish`、`[]` 与 `null` 语义区分、SSE 终态自关、`/runs` 多条件筛选、`/runs/{id}/stats`。
+前端：发布按钮与版本语义、422 逐条问题面板（可点节点定位）、AutoSave 状态、流式 token 追加输出区、执行步数、`/stats` 节点指标表、运行历史流程筛选与耗时/输入摘要、回放页节点耗时与审批卡、流程 404 空态。
 
 ### A. 自动化
 
@@ -30,14 +35,15 @@ cd agentflow-backend
 | `test_resume_continues_after_human_approval` | 审批后续跑真能跑完，末条事件是 `run_completed` |
 | `test_seq_recovers_from_database_after_bus_restart` | 重启后 seq 接着库里的最大值走，不撞主键 |
 
-### B. 手工（Swagger `http://localhost:8000/docs`，或下面 curl）
-
-先启动：
+前端：
 
 ```powershell
-cd agentflow-backend
-.venv\Scripts\python.exe -m uvicorn app.main:app --port 8000
+cd agentflow-frontend
+npm run typecheck   # 期望无输出
+npm run build       # 期望 "✓ built in ..."，只有 chunk >500kB 的提示
 ```
+
+### B. 后端手工（Swagger `http://localhost:8000/docs`）
 
 | # | 操作 | 期望 |
 |---|---|---|
@@ -61,16 +67,36 @@ Invoke-RestMethod "$base/runs/$($run.id)/cancel" -Method Post -ContentType "appl
 
 期望最后一行 `status : cancelled`、`outputs :`（空）。
 
-### C. 前端联调判断点（R1 前端切片完成后）
+### C. 前端联调（需两端都启动）
 
-| 检查 | 期望 |
-|---|---|
-| 编辑器改节点配置，停手 1 秒 | 顶部 `v1` 徽标**不变**（自动保存只写内容） |
-| 点「发布」 | 徽标变 `v2`，且校验不通过的流程发布被拦下并提示 |
-| 运行抽屉「指标」页 | token / 成本来自 `/api/runs/{id}/stats`，节点维度有耗时 |
-| 运行中点停止 | 3 秒内状态变「已取消」，日志不再滚动 |
-| 运行历史页 | 可按流程筛选，不只是状态 |
-| 终态 run 的回放页 | 事件表加载完不会一直转圈 |
+```powershell
+# 终端 1
+cd agentflow-backend; .venv\Scripts\python.exe -m uvicorn app.main:app --port 8000
+# 终端 2
+cd agentflow-frontend; npm run dev
+```
+
+| 检查 | 期望 | 本轮实测 |
+|---|---|---|
+| 编辑器改配置后停手 | 顶部 `v1` 不变，出现「自动保存中…」再消失 | ✅ 运行后仍为 `v1` |
+| 点「发布」 | 徽标变 `v2`；校验不过则顶部红条列出问题 | ✅ `v1 → v2`，无报错 |
+| 运行抽屉「输出结果」 | 运行中逐字追加 token 文本（带光标），结束后显示 JSON | ✅ 得到「你好，这是 流式 token 输出。」+ outputs |
+| 运行抽屉「指标成本」 | 节点表：每节点 Token / 耗时 / 成本 | ✅ input_1 350ms、llm_1 10 tokens、output_1 73ms |
+| 运行中点「停止」 | 3 秒内变「已取消」，步骤数与日志停止增长 | ✅ 运行中 → 已取消，步骤冻在 2 |
+| `input → human → output` 运行 | 抽屉弹审批卡并显示节点配置的提示文案 | ✅ 显示「确认允许高风险工具调用？」 |
+| 点「批准并续跑」 | 状态变「成功」，步骤 +1 | ✅ 等待审批 → 成功，步骤 3 |
+| 运行历史按流程筛选 | 下拉列出流程名与版本，表格有流程名/输入摘要/耗时 | ✅ 3 条记录、流程名正确 |
+| 终态 run 回放页 | 事件表直接加载完（13 条），不转圈 | ✅ 13 条事件 + 节点维度卡片 |
+| 访问不存在的流程 | 显示「流程加载失败 + 返回列表 / 重试」 | ✅ 不再永久停在「加载流程中」 |
+
+> 想复现「停止」逐帧效果：用 `DEMO_STEP_DELAY=0.5` 启动后端，运行会持续约 3 秒。
+> PowerShell：`$env:DEMO_STEP_DELAY="0.5"; .venv\Scripts\python.exe -m uvicorn app.main:app --port 8000`
+
+### D. 已知说明
+
+- 演示执行器（`app/engine/demo_runner.py`）不调 LLM，token 是固定片段；R2 换成真实流式后才会有真实内容与成本。
+- 浏览器控制台偶发 `WebSocket ws://127.0.0.1:5173 failed`：这是 dev server 被重启后 HMR 套接字残留，刷新页面即消失，与业务代码无关。
+
 
 ## R2 · 后端执行引擎（B2） + 前端 Schema 对接
 

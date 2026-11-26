@@ -30,3 +30,41 @@ export interface Run {
   startedAt?: string | null;
   finishedAt?: string | null;
 }
+
+export interface NodeStats {
+  nodeId: string;
+  tokens: number;
+  cost: number;
+  durationMs: number;
+  status: string;
+}
+
+export interface RunStats {
+  runId: string;
+  totalTokens: number;
+  nodes: NodeStats[];
+}
+
+export const TERMINAL_STATUSES: RunStatus[] = ["succeeded", "failed", "cancelled"];
+
+export function isTerminal(status: RunStatus): boolean {
+  return TERMINAL_STATUSES.includes(status);
+}
+
+export const STATUS_TEXT: Record<RunStatus, string> = {
+  pending: "未开始",
+  running: "运行中",
+  waiting_human: "等待审批",
+  succeeded: "成功",
+  failed: "失败",
+  cancelled: "已取消",
+};
+
+export const STATUS_BADGE: Record<RunStatus, string> = {
+  pending: "badge-gray",
+  running: "badge-blue",
+  waiting_human: "badge-purple",
+  succeeded: "badge-green",
+  failed: "badge-red",
+  cancelled: "badge-gray",
+};

@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { RunEvent, RunStatus } from "@/types/run";
+import type { Run, RunEvent, RunStats, RunStatus } from "@/types/run";
 
 interface RunStore {
   runId: string | null;
@@ -10,10 +10,17 @@ interface RunStore {
   cost: number;
   lastSeq: number;
   error: string | null;
+  /** token 事件累积的可见文本：运行中实时追加，用于输出区流式预览 */
+  streamText: string;
+  outputs: Record<string, unknown> | null;
+  stats: RunStats | null;
 
   reset: () => void;
   setRunId: (id: string | null) => void;
   setStatus: (status: RunStatus) => void;
+  /** 用 GET /runs/{id} 的权威数据覆盖本地推断状态（回放页/刷新后） */
+  applyRunDetail: (run: Run) => void;
+  setStats: (stats: RunStats | null) => void;
   appendEvent: (event: RunEvent) => void;
 }
 
@@ -26,6 +33,9 @@ const initial = {
   cost: 0,
   lastSeq: 0,
   error: null as string | null,
+  streamText: "",
+  outputs: null as Record<string, unknown> | null,
+  stats: null as RunStats | null,
 };
 
 export const useRunStore = create<RunStore>((set) => ({
@@ -34,6 +44,17 @@ export const useRunStore = create<RunStore>((set) => ({
   reset: () => set({ ...initial, events: [] }),
   setRunId: (runId) => set({ runId }),
   setStatus: (status) => set({ status }),
+  setStats: (stats) => set({ stats }),
+
+  applyRunDetail: (run) =>
+    set({
+      runId: run.id,
+      status: run.status,
+      tokens: run.tokenUsage,
+      cost: run.costEstimate,
+      outputs: run.outputs ?? null,
+      error: run.error ?? null,
+    }),
 
   appendEvent: (event) =>
     set((state) => {
@@ -51,9 +72,13 @@ export const useRunStore = create<RunStore>((set) => ({
         case "node_completed":
           next.activeNodeId = null;
           break;
-        case "token":
-          next.tokens = state.tokens + Number(event.payload.deltaTokens ?? 1);
+        case "token": {
+          // 关键：token 事件必须逐块拼到可见文本，而不是只做计数
+          next.streamText = state.streamText + String(event.payload.text ?? "");
+          next.tokens = state.tokens + Number(event.payload.deltaTokens ?? 0);
+          next.cost = state.cost + Number(event.payload.cost ?? 0);
           break;
+        }
         case "human_required":
           next.status = "waiting_human";
           break;
@@ -61,14 +86,25 @@ export const useRunStore = create<RunStore>((set) => ({
           next.status = "succeeded";
           next.tokens = Number(event.payload.tokens ?? state.tokens);
           next.cost = Number(event.payload.cost ?? state.cost);
+          next.outputs = (event.payload.outputs as Record<string, unknown>) ?? null;
           next.activeNodeId = null;
           break;
         case "run_failed":
-          next.status = "failed";
+          next.status = "cancelled";
           next.error = String(event.payload.error ?? "运行失败");
           next.activeNodeId = null;
+          if (event.payload.cancelled) {
+            next.status = "cancelled";
+          } else {
+            next.status = "failed";
+          }
           break;
       }
       return next as RunStore;
     }),
 }));
+
+/** 运行中由事件推断的「执行步数」：一个节点启动即一步。 */
+export function countSteps(events: RunEvent[]): number {
+  return events.filter((event) => event.type === "node_started").length;
+}

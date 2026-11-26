@@ -1,5 +1,9 @@
+# 运行环境：Python 3.10+（实测 3.10.10 与 3.13.18 均可）
+# uvicorn 0.35+ 的 websockets-sansio 集成依赖 websockets>=14，而后者用了 typing.Self（3.11+），
+# 在 3.10 上 import 即报错；因此这里锁 3.10 可用的组合。
 fastapi>=0.115,<1.0
-uvicorn[standard]>=0.34,<1.0
+uvicorn[standard]>=0.30,<0.35
+websockets>=12.0,<13.0
 aiosqlite>=0.20,<1.0
 pydantic>=2.10,<3.0
 pydantic-settings>=2.7,<3.0

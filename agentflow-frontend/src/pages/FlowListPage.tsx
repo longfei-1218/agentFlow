@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useState } from "react";
-import { Copy, GitBranch, Trash2 } from "lucide-react";
+import { Copy, GitBranch, Plus, Trash2 } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { flowsApi } from "@/api/flows";
 import { runsApi } from "@/api/runs";
 import { definitionsByType } from "@/registry/nodes";
 import type { Flow } from "@/types/flow";
+import { createDefaultFlow } from "@/utils/flow";
 
 export function FlowListPage() {
   const navigate = useNavigate();
@@ -36,6 +37,11 @@ export function FlowListPage() {
     await load();
   };
 
+  const handleCreate = async () => {
+    const created = await flowsApi.create(createDefaultFlow());
+    navigate(`/flows/${created.id}`);
+  };
+
   return (
     <div className="h-full overflow-y-auto p-6">
       <div className="flex items-center justify-between mb-5">
@@ -43,10 +49,13 @@ export function FlowListPage() {
           <h1 className="text-[20px] font-semibold">流程编排</h1>
           <p className="text-[12px] text-ink-3 mt-1">在画布上定义节点拓扑，配置参数后运行并观测全流程事件。</p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex gap-2 items-center">
           <span className="chip">共 {flows.length} 个流程</span>
           <span className="chip">运行记录 {runCount}</span>
           <span className="chip">节点类型 {Object.keys(definitionsByType).length}</span>
+          <button className="btn-primary" onClick={() => void handleCreate()}>
+            <Plus size={14} className="inline mr-1.5 -mt-0.5" />新建流程
+          </button>
         </div>
       </div>
 
