@@ -43,10 +43,14 @@ class Flow(CamelModel):
 
 
 class FlowCreate(CamelModel):
-    """创建请求：id/version/时间戳由服务端生成。"""
+    """创建请求：id/version/时间戳由服务端生成。
+
+    nodes/edges 为 None 表示「调用方没提供结构」，服务端补默认流程；
+    显式传空数组是合法输入（空白画布），不能和「没传」混为一谈。
+    """
     name: str = "未命名流程"
-    nodes: list[FlowNode] = Field(default_factory=list)
-    edges: list[FlowEdge] = Field(default_factory=list)
+    nodes: list[FlowNode] | None = None
+    edges: list[FlowEdge] | None = None
 
 
 class ValidationIssue(CamelModel):

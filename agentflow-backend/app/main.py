@@ -10,13 +10,17 @@ from fastapi.staticfiles import StaticFiles
 
 from app.api import flows, runs
 from app.config import settings
-from app.database import init_db
+from app.database import db, init_db
+from app.services.run_manager import run_manager
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
     yield
+    # 先给执行器留下终态再关库，避免出现永远 running 的僵尸记录
+    await run_manager.shutdown()
+    await db.close()
 
 
 app = FastAPI(title="AgentFlow Studio API", version="1.1", lifespan=lifespan)

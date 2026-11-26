@@ -2,13 +2,17 @@
 
 执行引擎写入 -> 先落 run_events 表 -> 再推给所有订阅队列。
 SSE 路由按 seq 排序去重，断线重连时从 Last-Event-ID 续推。
+
+序号规则：
+- 内存里缓存每个 run 的 seq 游标，避免每次都查库；
+- 缓存未命中时从 run_events 的 MAX(seq) 恢复，服务重启后不会从 1 重发撞主键。
 """
 import asyncio
 from datetime import datetime, timezone
 
 import orjson
 
-from app.database import get_db
+from app.database import db
 from app.models.run import EventType, RunEvent
 
 
@@ -34,6 +38,18 @@ class EventBus:
             if not subscribers:
                 self._subscribers.pop(run_id, None)
 
+    async def _ensure_seq(self, run_id: str) -> int:
+        """缓存未命中时从数据库恢复游标（调用方需持有 self._lock）。"""
+        cached = self._seq.get(run_id)
+        if cached is not None:
+            return cached
+        row = await db.fetchone(
+            "SELECT MAX(seq) AS m FROM run_events WHERE run_id = ?", (run_id,)
+        )
+        current = int(row["m"]) if row and row["m"] is not None else 0
+        self._seq[run_id] = current
+        return current
+
     async def emit(
         self,
         run_id: str,
@@ -42,7 +58,8 @@ class EventBus:
         payload: dict | None = None,
     ) -> RunEvent:
         async with self._lock:
-            seq = self._seq.get(run_id, 0) + 1
+            await self._ensure_seq(run_id)
+            seq = self._seq[run_id] + 1
             self._seq[run_id] = seq
 
         event = RunEvent(
@@ -55,40 +72,29 @@ class EventBus:
             created_at=utc_now(),
         )
 
-        db = await get_db()
-        try:
-            await db.execute(
-                "INSERT INTO run_events (run_id, seq, type, node_id, payload_json, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (
-                    run_id,
-                    seq,
-                    event.type,
-                    node_id,
-                    orjson.dumps(event.payload).decode(),
-                    event.created_at,
-                ),
-            )
-            await db.commit()
-        finally:
-            await db.close()
+        await db.execute(
+            "INSERT INTO run_events (run_id, seq, type, node_id, payload_json, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                run_id,
+                seq,
+                event.type,
+                node_id,
+                orjson.dumps(event.payload).decode(),
+                event.created_at,
+            ),
+        )
 
         for queue in list(self._subscribers.get(run_id, ())):
             queue.put_nowait(event)
         return event
 
     async def history(self, run_id: str, after_seq: int = 0) -> list[RunEvent]:
-        db = await get_db()
-        try:
-            cursor = await db.execute(
-                "SELECT run_id, seq, type, node_id, payload_json, created_at "
-                "FROM run_events WHERE run_id = ? AND seq > ? ORDER BY seq",
-                (run_id, after_seq),
-            )
-            rows = await cursor.fetchall()
-        finally:
-            await db.close()
-
+        rows = await db.fetchall(
+            "SELECT run_id, seq, type, node_id, payload_json, created_at "
+            "FROM run_events WHERE run_id = ? AND seq > ? ORDER BY seq",
+            (run_id, after_seq),
+        )
         return [
             RunEvent(
                 id=f"ev_{row['run_id']}_{row['seq']}",
@@ -103,7 +109,7 @@ class EventBus:
         ]
 
     def seed_seq(self, run_id: str, seq: int) -> None:
-        """服务重启后从已落库的最大 seq 继续，避免序号冲突。"""
+        """显式设置游标（新 run 传 0；续跑前传 MAX(seq)）。"""
         self._seq[run_id] = max(self._seq.get(run_id, 0), seq)
 
 
