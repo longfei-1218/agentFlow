@@ -1,6 +1,6 @@
 import clsx from "clsx";
 import { Handle, Position, type NodeProps } from "@xyflow/react";
-import { definitionsByType } from "@/registry/nodes";
+import { useNodeTypeStore } from "@/store/nodeTypeStore";
 import type { AgentNode } from "@/utils/flow";
 
 function text(value: unknown): string {
@@ -25,8 +25,14 @@ function summary(type: string, config: Record<string, unknown>): string {
 }
 
 export function FlowNodeView({ data, selected }: NodeProps<AgentNode>) {
-  const definition = definitionsByType[data.nodeType];
-  if (!definition) return null;
+  const spec = useNodeTypeStore((s) => s.byType[data.nodeType]);
+  // Schema 还没加载到时给一个降级外观，别让整张画布出现空白节点
+  const definition = spec ?? {
+    label: data.nodeType,
+    icon: "?",
+    color: "#94a3b8",
+    type: data.nodeType,
+  };
 
   return (
     <div

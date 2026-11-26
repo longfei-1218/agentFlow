@@ -6,10 +6,17 @@
 from collections import deque
 
 from app.models.flow import Flow, ValidationIssue, ValidationResult
+from app.nodes.registry import validate_config
 
 
 def validate_flow(flow: Flow) -> ValidationResult:
     errors: list[ValidationIssue] = []
+
+    # 节点配置按注册表的 Pydantic 模型校验：界面允许填什么，这里就认什么
+    for node in flow.nodes:
+        for problem in validate_config(node.type, node.config):
+            errors.append(ValidationIssue(node_id=node.id, message=problem))
+
     ids = [n.id for n in flow.nodes]
     id_set = set(ids)
 

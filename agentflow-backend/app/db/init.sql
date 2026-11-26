@@ -1,5 +1,5 @@
--- AgentFlow Studio 表结构（8 张表，按可迁移设计，不用 SQLite 专有语法）
--- P1 只用 flows / runs / run_events，其余表先建好，避免后续迁移。
+-- AgentFlow Studio 表结构（9 张表，按可迁移设计，不用 SQLite 专有语法）
+-- 已启用：flows / runs / run_events / settings；其余表先建好，避免后续迁移。
 
 CREATE TABLE IF NOT EXISTS flows (
     id TEXT PRIMARY KEY,
@@ -37,6 +37,12 @@ CREATE TABLE IF NOT EXISTS run_events (
     created_at TEXT NOT NULL,
     PRIMARY KEY (run_id, seq),
     FOREIGN KEY (run_id) REFERENCES runs(id)
+);
+
+CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,
+    value_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS tools (

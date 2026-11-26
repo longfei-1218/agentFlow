@@ -11,7 +11,7 @@ import {
   type Edge,
 } from "@xyflow/react";
 import { useFlowStore } from "@/store/flowStore";
-import { definitionsByType } from "@/registry/nodes";
+import { useNodeTypeStore } from "@/store/nodeTypeStore";
 import type { NodeType } from "@/types/flow";
 import { flowToEdges, flowToNodes, type AgentNode } from "@/utils/flow";
 import { FlowNodeView } from "./FlowNodeView";
@@ -29,6 +29,7 @@ export function FlowCanvas() {
   const removeNode = useFlowStore((s) => s.removeNode);
   const removeEdge = useFlowStore((s) => s.removeEdge);
   const setSelected = useFlowStore((s) => s.setSelected);
+  const byType = useNodeTypeStore((s) => s.byType);
   const { screenToFlowPosition, fitView } = useReactFlow();
 
   const [nodes, setNodes, onNodesChange] = useNodesState<AgentNode>([]);
@@ -46,11 +47,11 @@ export function FlowCanvas() {
     (event: React.DragEvent) => {
       event.preventDefault();
       const type = event.dataTransfer.getData(NODE_DRAG_MIME) as NodeType;
-      if (!type || !definitionsByType[type]) return;
+      if (!type || !byType[type]) return;
       const position = screenToFlowPosition({ x: event.clientX, y: event.clientY });
       addNode(type, position);
     },
-    [addNode, screenToFlowPosition],
+    [addNode, byType, screenToFlowPosition],
   );
 
   const errorNodes = useMemo(
@@ -79,7 +80,7 @@ export function FlowCanvas() {
         <Background variant={BackgroundVariant.Dots} gap={20} size={1} color="#d1d5db" />
         <Controls showInteractive={false} />
         <MiniMap
-          nodeColor={(node) => definitionsByType[(node.data as AgentNode["data"]).nodeType]?.color ?? "#94a3b8"}
+          nodeColor={(node) => byType[(node.data as AgentNode["data"]).nodeType]?.color ?? "#94a3b8"}
           maskColor="rgba(246,247,249,.75)"
         />
       </ReactFlow>

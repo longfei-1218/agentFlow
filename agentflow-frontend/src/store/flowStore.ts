@@ -1,7 +1,8 @@
 import type { Connection } from "@xyflow/react";
 import { create } from "zustand";
+import { ApiError } from "@/api/client";
 import { flowsApi } from "@/api/flows";
-import { definitionsByType } from "@/registry/nodes";
+import { useNodeTypeStore } from "@/store/nodeTypeStore";
 import type { Flow, FlowCreate, NodeType, ValidationIssue } from "@/types/flow";
 import type { RuntimeState } from "@/utils/flow";
 
@@ -43,6 +44,9 @@ interface FlowStore {
   toCreatePayload: () => FlowCreate;
 }
 
+/** 保存队列：保证同一时刻只有一个 PUT 在飞（见 save() 注释） */
+let saveQueue: Promise<void> = Promise.resolve();
+
 export const useFlowStore = create<FlowStore>((set, get) => ({
   flow: emptyFlow,
   selectedNodeId: null,
@@ -82,7 +86,8 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
   },
 
   addNode: (type, position) => {
-    const definition = definitionsByType[type];
+    // 默认配置也来自后端 Schema：新增节点开箱即合法，不用在前端再抄一份默认值
+    const definition = useNodeTypeStore.getState().byType[type];
     if (!definition) return;
     const { flow } = get();
     const id = nextNodeId(type, flow.nodes.map((n) => n.id));
@@ -204,19 +209,47 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
   },
 
   save: async () => {
-    const { flow } = get();
+    const flow = get().flow;
     if (!flow.id) return;
-    const updated = await flowsApi.update(flow.id, get().toCreatePayload());
-    set({
-      flow: updated,
-      dirty: false,
-      lastSavedAt: new Date().toISOString(),
-    });
+
+    // 串行化保存：并发的两个 PUT 会拿着同一个 baseUpdatedAt，
+    // 后到的那个必然被判 FLOW_STALE，白白丢掉刚敲的字
+    const task = async () => {
+      const current = get().flow;
+      if (!current.id) return;
+      try {
+        // 带上 baseUpdatedAt：如果这期间别处改过这条流程，服务端会 409 而不是默默被覆盖
+        const updated = await flowsApi.update(current.id, {
+          ...get().toCreatePayload(),
+          baseUpdatedAt: current.updatedAt,
+        });
+        set({
+          flow: updated,
+          dirty: false,
+          lastSavedAt: new Date().toISOString(),
+        });
+      } catch (error) {
+        if (error instanceof ApiError && error.code === "FLOW_STALE") {
+          await get().loadFlow(current.id);  // 拉回最新，别让本地留着一份覆盖不了的状态
+          throw new ApiError(
+            409,
+            "FLOW_STALE",
+            "该流程在别的窗口或标签页被修改过，已重新加载最新内容，本次修改没有覆盖上去",
+          );
+        }
+        throw error;
+      }
+    };
+
+    const queued = saveQueue.then(task, task);
+    saveQueue = queued.catch(() => undefined);
+    return queued;
   },
 
   publish: async () => {
     const { flow } = get();
     if (!flow.id) return;
+    // 保存冲突时直接抛给页面，不要把过期的 DSL 发布成新版本
     await get().save();
     const published = await flowsApi.publish(flow.id);
     set({

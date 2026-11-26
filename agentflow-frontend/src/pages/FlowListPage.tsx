@@ -3,7 +3,7 @@ import { Copy, GitBranch, Plus, Trash2 } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { flowsApi } from "@/api/flows";
 import { runsApi } from "@/api/runs";
-import { definitionsByType } from "@/registry/nodes";
+import { useNodeTypeStore } from "@/store/nodeTypeStore";
 import type { Flow } from "@/types/flow";
 import { createDefaultFlow } from "@/utils/flow";
 
@@ -12,6 +12,7 @@ export function FlowListPage() {
   const [flows, setFlows] = useState<Flow[]>([]);
   const [runCount, setRunCount] = useState(0);
   const [loading, setLoading] = useState(true);
+  const nodeTypeCount = useNodeTypeStore((s) => s.types.length);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -52,7 +53,7 @@ export function FlowListPage() {
         <div className="flex gap-2 items-center">
           <span className="chip">共 {flows.length} 个流程</span>
           <span className="chip">运行记录 {runCount}</span>
-          <span className="chip">节点类型 {Object.keys(definitionsByType).length}</span>
+          <span className="chip">节点类型 {nodeTypeCount}</span>
           <button className="btn-primary" onClick={() => void handleCreate()}>
             <Plus size={14} className="inline mr-1.5 -mt-0.5" />新建流程
           </button>

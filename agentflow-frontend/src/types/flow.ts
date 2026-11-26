@@ -31,6 +31,8 @@ export interface FlowCreate {
   name: string;
   nodes: FlowNode[];
   edges: FlowEdge[];
+  /** 乐观锁：加载时看到的 updatedAt；服务端发现已被改过会回 409 FLOW_STALE */
+  baseUpdatedAt?: string | null;
 }
 
 export interface ValidationIssue {

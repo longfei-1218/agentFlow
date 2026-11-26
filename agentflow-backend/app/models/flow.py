@@ -47,10 +47,14 @@ class FlowCreate(CamelModel):
 
     nodes/edges 为 None 表示「调用方没提供结构」，服务端补默认流程；
     显式传空数组是合法输入（空白画布），不能和「没传」混为一谈。
+
+    base_updated_at 是可选乐观锁：调用方带上「我加载时看到的 updatedAt」，
+    服务端发现已经被别人改过就拒绝覆盖（防两个标签页互相回滚配置）。
     """
     name: str = "未命名流程"
     nodes: list[FlowNode] | None = None
     edges: list[FlowEdge] | None = None
+    base_updated_at: str | None = None
 
 
 class ValidationIssue(CamelModel):

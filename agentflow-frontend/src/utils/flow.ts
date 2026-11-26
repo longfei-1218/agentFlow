@@ -48,7 +48,8 @@ export const createDefaultFlow = (name = "未命名流程"): FlowCreate => ({
       type: "llm",
       position: { x: 360, y: 160 },
       config: {
-        model: "gpt-4o-mini",
+        // 留空 = 跟随「模型设置」里的默认模型；写死厂商模型名换网关就 400
+        model: "",
         temperature: 0.7,
         max_tokens: 1024,
         system: "你是一个有帮助的助手。",

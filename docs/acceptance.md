@@ -10,6 +10,27 @@ cd agentflow-backend
 .venv\Scripts\python.exe -m pip install -r requirements-dev.txt
 ```
 
+### 环境自检（2026-11-26 修复过一次启动崩溃）
+
+本次事故：对已有 `.venv` 重跑 `python -m venv .venv`，解释器被换成 3.10，但 `Lib\site-packages` 还是 3.13 时代装的包，启动时报 `ImportError: cannot import name 'Self' from 'typing'`。
+
+已做的修复，四项都要在：
+
+| 项 | 判断方法 | 期望 |
+|---|---|---|
+| venv 解释器 | `.venv\Scripts\python.exe -V` | `Python 3.10.10`（3.10+ 均可） |
+| 依赖无错配 | `pip list` 里 `websockets` / `uvicorn` | `12.0` / `0.34.3`（requirements 已锁区间） |
+| 代码无 3.11 专有语法 | `Select-String -Path app\*.py,app\**\*.py -Pattern StrEnum` | 无命中（已改成 `str, Enum`） |
+| 启动参数 | 后端启动命令 | 必须带 `--reload-dir app` |
+
+重建 venv 的正确姿势（换解释器版本时）：
+
+```powershell
+Remove-Item -Recurse -Force .venv
+py -3.10 -m venv .venv
+.venv\Scripts\python.exe -m pip install -r requirements.txt -r requirements-dev.txt
+```
+
 ## R1 · 后端地基（B1） + 前端对接版本语义
 
 状态：**已完成**（后端 + 前端切片，均已实测）
@@ -100,7 +121,89 @@ cd agentflow-frontend; npm run dev
 
 ## R2 · 后端执行引擎（B2） + 前端 Schema 对接
 
-状态：待做。验收清单在本轮结束时补。
+状态：**已完成**（后端 + 前端切片，均已实测；实跑数据见下表「本轮实测」）
+
+### 0. 这轮改了什么
+
+后端：`app/nodes/registry.py`（11 类节点各一个 Pydantic 配置模型 → 反推 JSON Schema，同一份定义同时用于导出与校验）、`GET /api/node-types`、`settings` 表 + `GET/PUT /api/settings/llm`、`POST /api/settings/llm/test`、`app/services/llm.py`（OpenAI 兼容流式 + usage/成本校准）、`app/engine/loop.py`（手写 Agent Loop，`MAX_STEPS` 守卫 `StepLimitExceeded`）、`app/engine/common.py`（与 demo 共用的拓扑/状态/终态件）、`app/engine/executor.py`（`RUNNER=demo|loop` 选择）、未配置 Key 时运行返回 **409 `LLM_NOT_CONFIGURED`**。
+前端：删掉 `src/registry/nodes.ts`（硬编码注册表），改为 `store/nodeTypeStore.ts` 从后端拉；Palette / 画布 / 配置面板 / 新增节点默认值全部吃后端 Schema；新增「模型设置」弹层（脱敏 Key、测试连接、保存）；顶部与编辑器出现「未配置模型」入口，运行被 409 拦下时自动弹设置；运行面板把「节点数」与「模型调用数」拆开显示。
+
+### A. 自动化
+
+```powershell
+cd agentflow-backend
+.venv\Scripts\python.exe -m pytest          # 期望 32 passed（R1 的 15 + R2 新增 14 + 模型名/并发保存修复 3）
+
+cd ..\agentflow-frontend
+npm run typecheck                           # 期望无输出
+npm run build                               # 期望 ✓ built
+```
+
+新增用例守什么：
+
+| 用例文件 | 它守的是什么 |
+|---|---|
+| `test_node_types.py` | 11 类节点 Schema 齐全、`/node-types` 与注册表一致、坏配置能被校验逐条报出（nodeId + 字段） |
+| `test_settings.py` | Key 只写不返回（只给 `sk-a…3456` 脱敏）、省略不动 / 空串清空、DB 配置压过 `.env`、连不通时给可读原因不抛 500 |
+| `test_loop.py` | 真流式的 token 帧与 usage 校准（9 tokens 不多不少）、prompt 插值真的进了模型消息、`MAX_STEPS=1` 跑两段模型必失败且服务不崩、未配 Key 时 409 且无模型节点的流程照常能跑、审批中断续跑在 loop 下同样成立、**节点写死网关不认的模型时报错要说清「哪个模型/哪个节点/怎么改」** |
+| `test_settings.py`（新增 1 条） | `GET /api/settings/llm/models` 会把网关列表和「当前默认模型是否被支持」一起给出；网关报错时返回 `ok:false` 而不是 500 |
+| `test_flows.py`（新增 1 条） | **过期保存必须被挡住**：两个标签页拿同一个 `baseUpdatedAt` 先后 PUT，第二个回 409 `FLOW_STALE`，且服务端内容不被覆盖；不带 `baseUpdatedAt` 的老调用仍兼容 |
+
+### B. 页面验收（**先看这节：打开哪个页面，验哪些功能**）
+
+前置：两端都起（命令见根 README）。示例流程用 `flow_3c2a0e36`（input → llm → output），你自己的流程换成对应 id 即可。
+
+| # | 打开哪个页面 | 做什么 | 期望 | 本轮实测 |
+|---|---|---|---|---|
+| 1 | `http://localhost:5173/flows` | 看右上角三个 chip | 「节点类型 **11**」；顶部有「模型设置」按钮 | ✅ 11、按钮在 |
+| 2 | `http://localhost:5173/flows/flow_3c2a0e36` | 看左侧「节点库」 | 四组（基础/模型/工具/控制）共 11 项，与后端 `GET /api/node-types` 完全一致；tool / mcp / skill / knowledge / condition / loop 带**「占位」**小标 | ✅ 11 项、6 个占位标 |
+| 3 | 同上，点画布里的「模型」节点 | 看右侧配置面板 | 面板标题下方出现后端给的节点描述「调用 OpenAI 兼容接口，流式吐 token」；表单字段 = 后端 Schema：**模型 / Temperature / Max tokens / System Prompt**，URL 里没加载完时不会出现空白面板 | ✅ 4 字段 + 描述 + `llm.config.v1` |
+| 4 | 同上，**未配置 Key** 时看编辑器顶部 | 找黄色 chip | 显示「未配置模型 · 点此设置」；点它就打开设置弹层 | ✅ 出现并可点 |
+| 5 | `http://localhost:5173/flows/{id}` 未配置 Key 时点「运行」 | 看顶部红条 + 弹层 | 红条写「尚未配置 LLM API Key，请先在「模型设置」里填写后再运行」；**设置弹层自动打开**；后端返回 409 而非创建一条必然失败的 run | ✅ 409 + 自动弹层 + 文案命中 |
+| 6 | 任意页面右上「模型设置」 | 填 Base URL / 模型 / Key，点「测试连接」 | 成功显示「连接正常，可用模型 N 个（xx ms）」；失败显示具体原因（不弹 500）；来源行显示 `.env` / `界面配置` | ✅ 「连接正常，可用模型 1 个（56 ms）」 |
+| 7 | 同一个弹层 | 保存后看 Key 输入框与来源 | 输入框被清空并提示「已存 sk-f…1234，留空则不修改」；来源变「界面配置」；**页面上任何地方都看不到明文 Key** | ✅ 脱敏 + 来源切换 |
+| 8 | 回到编辑器，配好之后点「运行」 | 看「实时日志」 | `run_started → node_started → 一串 token（文本逐块出现）→ node_completed → run_completed`；llm 节点的 `node_completed` 里带 `usage`（provider 真实用量） | ✅ 25 条事件，逐块流式 |
+| 9 | 运行抽屉切「指标成本」 | 看四张卡与节点表 | Token 用量 = 节点表 Token 之和（**不能两套数字**）；「模型调用」= `1 / 8`（8 = `MAX_STEPS`）；「节点执行」= 3；llm 节点耗时约 1s | ✅ Token 39 = 39；模型调用 1/8；节点 3 |
+| 10 | `http://localhost:5173/runs/{runId}` | 回放页 | 事件按序加载完（不转圈）、节点维度卡有耗时/token、终态显示「成功」 | ✅ 事件 25 条、llm_1 983ms/39 tokens |
+| 11 | 编辑器新建/拖一个节点 | 看默认配置 | 新节点默认值来自后端 `defaultConfig`（不是前端抄的一份）；`llm` 节点的「模型」默认是**空**（= 跟随系统默认），新建流程不会再带上某个厂商的模型名 | ✅ 空值 + 下拉显示「跟随系统默认」 |
+| 12 | `http://localhost:5173/flows/{id}`，选中「模型」节点 | 看「模型」字段 | 是**下拉**不是输入框：第一项「跟随系统默认（当前默认模型）」，后面是网关 `/models` 返回的真实模型名；下方有一行「节点级模型优先于系统默认」 | ✅ 跟随 deepseek-flash / deepseek-flash / deepseek-v4-pro |
+| 13 | 同上，节点里残留旧模型名（如 `gpt-4o-mini`） | 看红字 | select 里出现 `gpt-4o-mini（网关不支持）` 并提示「当前值 gpt-4o-mini 不在网关支持列表，点此改为跟随系统默认」；点一下即清空并自动保存，红字消失 | ✅ 点击后 select 回到「跟随系统默认」、后端 config `model` 为空 |
+| 14 | 同上，点「运行」 | 看输出 | 用全局默认模型跑通（`state.model` = 默认模型）；若仍不匹配，`run_failed.error` 会自带「节点 llm_1 的配置里写死了模型 X，节点级模型优先于系统默认；把它清空就跟随…」 | ✅ deepseek-flash 跑通、107 tokens、¥0.000482 |
+| 15 | **多标签页回滚**：两个标签页开同一条流程，A 页清空节点模型并等「已保存」，B 页（没有改动、状态是旧的）点「运行」 | 服务端配置是否被 B 页回滚 | B 页**不应该**把旧配置写回：`GET /api/flows/{id}` 的 `updatedAt` 不变、`model` 仍为空；B 页跑出来的 `state.model` 是全局默认模型 | ✅ 界面点运行后 `updatedAt` 未变、`model` 仍为空、run 成功 |
+| 16 | 上面 B 页切回前台（点一下另一个窗口再回来） | 是否自动同步 | 未保存改动为 0 时，页面会静默重新加载成服务端最新内容（节点模型显示「跟随系统默认」）；有未保存改动时不动 | ✅ 焦点回来即刷新 |
+| 17 | 强制让本地版本过期：A 页改点东西但别等保存，同时在别处 `PUT` 同一条流程，再让 A 页保存 | 冲突提示 | 顶部出现「该流程在别的窗口或标签页被修改过，已重新加载最新内容，本次修改没有覆盖上去」；服务器内容仍是别人的最新版本 | ✅ 409 `FLOW_STALE` + 自动重载 |
+
+**只验后端、不打开页面的最快方式**：`http://localhost:8000/docs` →
+`GET /api/node-types`（11 项）、`GET /api/settings/llm`（Key 只有脱敏预览）、`PUT /api/settings/llm`、`POST /api/settings/llm/test`。
+
+### C. 没有真实 Key 时怎么验（本地假模型）
+
+```powershell
+cd agentflow-backend
+.venv\Scripts\python.exe -m uvicorn tools.fake_llm:app --port 8899
+```
+
+然后在「模型设置」里填：
+
+| 字段 | 值 |
+|---|---|
+| Base URL | `http://127.0.0.1:8899/v1` |
+| API Key | 任意非空（如 `sk-fake`） |
+| 默认模型 | `fake-model` |
+
+它只做两件事：`/v1/models` 返回一个假模型、`/v1/chat/completions` 逐字吐 SSE 并在最后一帧带 `usage`。
+**它是开发桩，不是产品降级逻辑**：不配置就 409，绝不会偷偷返回假数据。
+
+### D. 口径与已知说明
+
+- **`MAX_STEPS` 数的是模型调用次数**，不是节点数：3 节点流程只算 1 步。要复现拦截，画两段 `llm` 串联并把 `MAX_STEPS` 调成 1，第二次调用会失败为 `run_failed{code:STEP_LIMIT_EXCEEDED}`，服务本身不受影响。
+- **Token 会先估算后校准**：流式为实时性按字符估算（中文 1 字≈1 token），provider 返回 `usage` 后会补一帧差额（可能是负数），所以运行中看到的数字在结束时可能**回落**到真实值。最终 `runs.token_usage` 与 `/stats` 汇总保持一致。
+- **占位节点不假装执行**：tool 会发 `tool_call` / `tool_result`（标注 `stub:true`），mcp / skill / knowledge / condition / loop 发 `node_completed{skipped:true}` 说明留到 R3–R5；`/api/node-types` 里 `implemented:false` 是同一事实的另一处体现。
+- **后端 `--reload` 在这台机器上偶发不生效**（WatchFiles 打印 Reloading 但子进程没换）。改了 `app/` 下的代码后如果行为没变，直接重启后端，不要怀疑代码。
+- **「模型」字段的优先级是：节点 config > 系统设置 > `.env`**。节点里留空才会走系统默认。默认模板已经改成留空；但如果你的流程是 R2 早期建的，节点里可能还留着 `gpt-4o-mini`，换成 DeepSeek 网关就会 400 —— 选中节点点一下红字那行即可修正。
+- **网关模型列表来自 `GET /api/settings/llm/models`**（后端打一次 `/models`）。网关不实现该接口时下拉退回手填输入框，不影响保存与运行。
+- **别在两个标签页里同时编辑同一条流程**。编辑器会自动保存整份 DSL，早先的实现是「点运行先无条件 save()」，一个开着不动的旧页面足以把别处改好的配置原地覆盖（本次 400 反复出现就是这么来的）。现在两道闸：`PUT` 带 `baseUpdatedAt`，过期回 409 `FLOW_STALE` 并自动重载；点运行时只在 `dirty` 为真才保存。改完配置如果界面没变化，先按 `Ctrl+R` 刷新页面再验。
+
 
 ## R3 · 工具层（B3） + 工具管理页
 

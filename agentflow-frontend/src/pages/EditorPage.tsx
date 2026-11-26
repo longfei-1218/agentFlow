@@ -12,6 +12,7 @@ import { RunDrawer } from "@/components/flow/RunDrawer";
 import { useFlowEvents } from "@/hooks/useFlowEvents";
 import { useFlowStore } from "@/store/flowStore";
 import { useRunStore } from "@/store/runStore";
+import { useLlmConfigured, useSettingsStore } from "@/store/settingsStore";
 
 interface ActionError {
   message: string;
@@ -43,6 +44,9 @@ export function EditorPage() {
   const setRunId = useRunStore((s) => s.setRunId);
   const setStatus = useRunStore((s) => s.setStatus);
 
+  const openSettings = useSettingsStore((s) => s.openModal);
+  const llmConfigured = useLlmConfigured();
+
   useFlowEvents(runId);
 
   useEffect(() => {
@@ -63,6 +67,22 @@ export function EditorPage() {
     return () => window.clearTimeout(timer);
   }, [dirty, flow, save]);
 
+  // 窗口重新获得焦点时同步一次：别的标签页/后端改过这条流程，就把本地刷成最新的
+  // （有未保存改动时不动，避免吞掉用户正在编辑的内容）
+  useEffect(() => {
+    const onFocus = async () => {
+      if (!flow.id || dirty) return;
+      try {
+        const latest = await flowsApi.get(flow.id);
+        if (latest.updatedAt !== flow.updatedAt) void loadFlow(flow.id);
+      } catch {
+        // 拿不到就算了，下次操作还有 409 兜底
+      }
+    };
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [flow.id, flow.updatedAt, dirty, loadFlow]);
+
   const handleRun = useCallback(async () => {
     setActionError(null);
     const valid = await validate();
@@ -71,7 +91,9 @@ export function EditorPage() {
       return;
     }
     try {
-      await save();
+      // 只在有改动时保存：没动过的旧标签页直接跑服务端版本，
+      // 否则它会把这里早已修好的配置（比如节点模型）原样覆盖回去
+      if (dirty) await save();
       const run = await flowsApi.run(flow.id);
       reset();
       setRunId(run.id);
@@ -80,11 +102,12 @@ export function EditorPage() {
       if (error instanceof ApiError) {
         setActionError({ message: error.message, issues: error.detail });
         if (error.detail.length > 0) setIssueOpen(true);
+        if (error.code === "LLM_NOT_CONFIGURED") openSettings();
         return;
       }
       setActionError({ message: "运行请求失败", issues: [] });
     }
-  }, [validate, save, flow.id, reset, setRunId, setStatus]);
+  }, [validate, save, flow.id, dirty, reset, setRunId, setStatus, openSettings]);
 
   const handlePublish = async () => {
     setActionError(null);
@@ -146,6 +169,11 @@ export function EditorPage() {
           onChange={(event) => rename(event.target.value)}
         />
         <span className="chip" title="发布版本：只有发布才 +1，自动保存不会变动">v{flow.version}</span>
+        {!llmConfigured && (
+          <button className="chip !text-warn !border-warn/40" onClick={openSettings} title="没有 API Key，含 llm 节点的流程无法运行">
+            未配置模型 · 点此设置
+          </button>
+        )}
         {dirty ? (
           <span className="text-[11px] text-warn">自动保存中…</span>
         ) : (

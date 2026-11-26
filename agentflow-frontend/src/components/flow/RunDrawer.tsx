@@ -32,6 +32,8 @@ export function RunDrawer({ onRun, onCancel, onApprove, canRun }: Props) {
       useRunStore();
 
   const steps = useMemo(() => countSteps(events), [events]);
+  const llmSteps = useRunStore((s) => s.llmSteps);
+  const maxSteps = useRunStore((s) => s.maxSteps);
   const terminal = isTerminal(status);
   const approval = events.find((event) => event.type === "human_required");
 
@@ -73,7 +75,10 @@ export function RunDrawer({ onRun, onCancel, onApprove, canRun }: Props) {
         <span className="text-[11px] text-ink-3 font-mono">{runId ?? "未开始运行"}</span>
 
         <div className="ml-auto flex items-center gap-3">
-          <span className="text-[11px] text-ink-2">步骤 <b className="text-ink">{steps}</b></span>
+          <span className="text-[11px] text-ink-2">节点 <b className="text-ink">{steps}</b></span>
+          <span className="text-[11px] text-ink-2" title="模型调用次数，受 MAX_STEPS 限制">
+            模型调用 <b className="text-ink">{llmSteps}{maxSteps ? `/${maxSteps}` : ""}</b>
+          </span>
           <span className="text-[11px] text-ink-2">Token <b className="text-ink">{tokens}</b></span>
           <span className="text-[11px] text-ink-2">成本 <b className="text-ink">¥{cost.toFixed(4)}</b></span>
           <span className="text-[11px] text-ink-2">耗时 <b className="text-ink">{(elapsed / 1000).toFixed(1)}s</b></span>
@@ -175,7 +180,8 @@ export function RunDrawer({ onRun, onCancel, onApprove, canRun }: Props) {
                   {[
                     ["Token 用量", String(tokens)],
                     ["预估成本", `¥${cost.toFixed(4)}`],
-                    ["执行步数", String(steps)],
+                    ["节点执行", String(steps)],
+                    ["模型调用", maxSteps ? `${llmSteps} / ${maxSteps}` : String(llmSteps)],
                     ["耗时", `${(elapsed / 1000).toFixed(1)} s`],
                   ].map(([label, value]) => (
                     <div key={label} className="card px-4 py-2.5 min-w-[140px]">

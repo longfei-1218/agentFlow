@@ -1,8 +1,9 @@
 import { useRef } from "react";
-import { Download, FileUp, Plus } from "lucide-react";
+import { Download, FileUp, Plus, Settings } from "lucide-react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { flowsApi } from "@/api/flows";
 import { useFlowStore } from "@/store/flowStore";
+import { useLlmConfigured, useSettingsStore } from "@/store/settingsStore";
 import type { FlowCreate } from "@/types/flow";
 import { createDefaultFlow, downloadFlow } from "@/utils/flow";
 
@@ -19,6 +20,8 @@ export function Topbar() {
   const navigate = useNavigate();
   const fileRef = useRef<HTMLInputElement>(null);
   const flow = useFlowStore((s) => s.flow);
+  const openSettings = useSettingsStore((s) => s.openModal);
+  const configured = useLlmConfigured();
   const isFlowRoute = location.pathname.startsWith("/flows");
   const isEditor = /^\/flows\/[^/]+/.test(location.pathname);
 
@@ -51,30 +54,45 @@ export function Topbar() {
         <span className="text-ink font-medium">{title}</span>
       </div>
 
-      {isFlowRoute && (
-        <div className="flex items-center gap-2">
-          <input
-            ref={fileRef}
-            type="file"
-            accept="application/json,.json"
-            className="hidden"
-            onChange={(event) => {
-              const file = event.target.files?.[0];
-              if (file) void handleImport(file);
-              event.target.value = "";
-            }}
-          />
-          <button className="btn" onClick={() => fileRef.current?.click()}>
-            <FileUp size={14} className="inline mr-1.5 -mt-0.5" />导入 JSON
+      <div className="flex items-center gap-2">
+        {!configured && (
+          <button
+            className="chip !text-warn !border-warn/40"
+            title="尚未配置 LLM API Key，运行含模型节点的流程会被拦下"
+            onClick={openSettings}
+          >
+            未配置模型
           </button>
-          <button className="btn" disabled={!isEditor || !flow.id} onClick={() => downloadFlow(flow)}>
-            <Download size={14} className="inline mr-1.5 -mt-0.5" />导出 JSON
-          </button>
-          <button className="btn-primary" onClick={() => void handleCreate()}>
-            <Plus size={14} className="inline mr-1.5 -mt-0.5" />新建流程
-          </button>
-        </div>
-      )}
+        )}
+        <button className="btn" onClick={openSettings} title="配置 LLM Base URL / Key / 默认模型">
+          <Settings size={14} className="inline mr-1.5 -mt-0.5" />模型设置
+        </button>
+
+        {isFlowRoute && (
+          <>
+            <input
+              ref={fileRef}
+              type="file"
+              accept="application/json,.json"
+              className="hidden"
+              onChange={(event) => {
+                const file = event.target.files?.[0];
+                if (file) void handleImport(file);
+                event.target.value = "";
+              }}
+            />
+            <button className="btn" onClick={() => fileRef.current?.click()}>
+              <FileUp size={14} className="inline mr-1.5 -mt-0.5" />导入 JSON
+            </button>
+            <button className="btn" disabled={!isEditor || !flow.id} onClick={() => downloadFlow(flow)}>
+              <Download size={14} className="inline mr-1.5 -mt-0.5" />导出 JSON
+            </button>
+            <button className="btn-primary" onClick={() => void handleCreate()}>
+              <Plus size={14} className="inline mr-1.5 -mt-0.5" />新建流程
+            </button>
+          </>
+        )}
+      </div>
     </header>
   );
 }

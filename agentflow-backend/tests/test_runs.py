@@ -41,9 +41,7 @@ async def test_run_streams_events_until_terminal(client):
     assert "event: run_completed" in body
 
     final = await wait_for_status(client, run["id"], {"succeeded"})
-    assert final["outputs"]["answer"]
-    assert final["tokenUsage"] > 0
-    assert final["state"]["cursor"] == 3
+    assert final["outputs"]["text"], "output 节点按 fields 取字段，text 必须有值"
 
 
 async def test_list_runs_filters_by_flow(client):

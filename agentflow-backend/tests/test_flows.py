@@ -41,6 +41,42 @@ async def test_put_keeps_version_and_publish_bumps_it(client):
     assert published.json()["version"] == 2
 
 
+async def test_put_with_stale_base_updated_at_is_rejected(client):
+    """两个标签页互相覆盖配置的经典事故：旧页面拿着过期 updatedAt 必须被 409 挡住。"""
+    flow = await create_flow(
+        client,
+        [node("input_1", "input", name="query"), node("output_1", "output", 200, fields=["text"])],
+        [edge("e_1", "input_1", "output_1")],
+        name="并发保存",
+    )
+    base = flow["updatedAt"]
+    assert base
+
+    # 第一个标签页正常保存（带当前 updatedAt）
+    first = await client.put(
+        f"/api/flows/{flow['id']}",
+        json={"name": "标签页A", "nodes": flow["nodes"], "edges": flow["edges"], "baseUpdatedAt": base},
+    )
+    assert first.status_code == 200
+
+    # 第二个标签页还拿着旧的 updatedAt，必须被拒，且不能写进去
+    stale = await client.put(
+        f"/api/flows/{flow['id']}",
+        json={"name": "标签页B", "nodes": flow["nodes"], "edges": flow["edges"], "baseUpdatedAt": base},
+    )
+    assert stale.status_code == 409
+    assert stale.json()["code"] == "FLOW_STALE"
+
+    current = (await client.get(f"/api/flows/{flow['id']}")).json()
+    assert current["name"] == "标签页A", "过期写入不能覆盖服务端内容"
+
+    # 不带 baseUpdatedAt 的老调用方式仍然兼容（脚本/测试不受影响）
+    legacy = await client.put(
+        f"/api/flows/{flow['id']}", json={"name": "脚本", "nodes": flow["nodes"], "edges": flow["edges"]}
+    )
+    assert legacy.status_code == 200
+
+
 async def test_publish_rejects_invalid_flow(client):
     flow = await create_flow(client, [], [], name="空白")
     response = await client.post(f"/api/flows/{flow['id']}/publish")

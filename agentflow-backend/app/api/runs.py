@@ -7,7 +7,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from sse_starlette.sse import EventSourceResponse
 
 from app.database import db
-from app.engine.demo_runner import run_demo_flow
+from app.engine import executor
 from app.models.run import Run, RunEvent, RunStatus
 from app.services.event_bus import event_bus, utc_now
 from app.services.flow_repo import load_flow
@@ -201,7 +201,7 @@ async def resume_run(run_id: str, payload: dict | None = None):
     await update_run(run_id, status=RunStatus.RUNNING.value, error=None, finished_at=None)
     event_bus.seed_seq(run_id, await max_seq(run_id))
     stop = run_manager.cancel_token(run_id)
-    run_manager.launch(run_id, run_demo_flow(run_id, flow, {}, stop=stop, resume_from=run.state))
+    run_manager.launch(run_id, executor.resume(run_id, flow, stop=stop))
     return await load_run(run_id)
 
 

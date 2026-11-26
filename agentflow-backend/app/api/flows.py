@@ -7,7 +7,7 @@ from fastapi import APIRouter, HTTPException, Response, status
 from fastapi.responses import JSONResponse
 
 from app.database import db
-from app.engine.demo_runner import run_demo_flow
+from app.engine import executor
 from app.models.flow import Flow, FlowCreate, FlowEdge, FlowNode
 from app.models.run import Run, RunStatus
 from app.services.event_bus import event_bus, utc_now
@@ -15,6 +15,7 @@ from app.services.flow_repo import load_flow, row_to_flow, save_flow
 from app.services.flow_service import validate_flow
 from app.services.run_manager import run_manager
 from app.services.run_repo import max_seq
+from app.services.settings_repo import get_llm_config
 
 router = APIRouter(prefix="/flows", tags=["flows"])
 
@@ -31,7 +32,9 @@ _DEFAULT_FLOW = {
             "type": "llm",
             "position": {"x": 360, "y": 160},
             "config": {
-                "model": "gpt-4o-mini",
+                # 故意留空：跟随「模型设置」里的默认模型。
+                # 写死某个厂商的模型名，换网关后就会 400（真实踩过）。
+                "model": "",
                 "temperature": 0.7,
                 "max_tokens": 1024,
                 "system": "你是一个有帮助的助手。",
@@ -120,6 +123,26 @@ async def update_flow(flow_id: str, payload: FlowCreate):
     编辑十分钟就能涨到几十上百，P4 的按版本对比会直接失真。
     """
     existing = await load_flow(flow_id)
+
+    # 乐观锁：只有当调用方明确给出 baseUpdatedAt 时才校验（老调用/脚本不受影响）。
+    # 没有这道闸，一个开着不动的旧标签页点「运行」会先 save() 把服务端改过的配置原地覆盖回去。
+    if (
+        payload.base_updated_at
+        and existing.updated_at
+        and payload.base_updated_at != existing.updated_at
+    ):
+        return JSONResponse(
+            status_code=409,
+            content={
+                "code": "FLOW_STALE",
+                "message": (
+                    "该流程在别的窗口或标签页已被修改，本次保存没有覆盖服务端内容；"
+                    "页面已重新加载最新版本，请确认后再操作"
+                ),
+                "detail": None,
+            },
+        )
+
     flow = Flow(
         id=flow_id,
         name=payload.name,
@@ -164,6 +187,19 @@ async def start_run(flow_id: str, payload: dict | None = None):
     if not result.valid:
         return _invalid_flow_response(result.errors)
 
+    # 真实执行器要模型；没配 Key 就不要创建 run 再让它失败，直接把用户引到设置页
+    if executor.runner_name() == "loop" and any(node.type == "llm" for node in flow.nodes):
+        llm = await get_llm_config()
+        if not llm.configured:
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "code": "LLM_NOT_CONFIGURED",
+                    "message": "尚未配置 LLM API Key，请先在「模型设置」里填写后再运行",
+                    "detail": None,
+                },
+            )
+
     inputs = (payload or {}).get("inputs", {}) if payload else {}
     run = Run(
         id=f"run_{uuid.uuid4().hex[:8]}",
@@ -192,5 +228,5 @@ async def start_run(flow_id: str, payload: dict | None = None):
     # 重启后同名 run 的 seq 必须接着库里最大序号走
     event_bus.seed_seq(run.id, await max_seq(run.id))
     stop = run_manager.cancel_token(run.id)
-    run_manager.launch(run.id, run_demo_flow(run.id, flow, inputs, stop=stop))
+    run_manager.launch(run.id, executor.start(run.id, flow, inputs, stop=stop))
     return run

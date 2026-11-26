@@ -13,9 +13,9 @@ class Settings(BaseSettings):
     LLM_DEFAULT_MODEL: str = "gpt-4o-mini"
 
     # 执行引擎
-    MAX_STEPS: int = 8
-    RUNNER: str = "demo"  # demo | loop
-    DEMO_STEP_DELAY: float = 0.05  # 演示执行器每步延迟（测试里调大以验证取消）
+    MAX_STEPS: int = 8      # 一次运行里允许的 LLM 调用次数上限（防无限自我循环）
+    RUNNER: str = "loop"    # loop = 真调模型（llm 节点）；demo = 确定性桩，用于离线回归
+    DEMO_STEP_DELAY: float = 0.05  # 节点间停顿（秒），测试里调大以验证取消
 
     CORS_ORIGINS: list[str] = ["http://localhost:5173"]
 

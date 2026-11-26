@@ -1,118 +1,32 @@
 """确定性演示执行器（不调用 LLM）。
 
 职责：在没有 LLM 的情况下验证「运行 -> SSE -> 取消 -> 人工审批 -> 断点续跑」整条链路，
-它是 P2 真实 Agent Loop 的回归基准，也是前端联调时的稳定桩。
+它是真实 Agent Loop 的回归基准，也是前端联调时的稳定桩。
 
-断点续跑约定（runs.state_json）：
-{
-  "cursor": int,          # 下一个待执行节点在拓扑序中的下标
-  "variables": {...},     # 节点间传递的变量表
-  "tokens": int,
-  "cost": float,
-  "human_pending": str|null   # 正在等待审批的节点 id
-}
-
-协程取消是协作式的：每个可中断点检查 stop 事件，命中后统一写 cancelled 终态。
+拓扑/状态/终态这些公共件已移到 app/engine/common.py，与 loop.py 共用。
 """
 import asyncio
+
 import orjson
 
 from app.config import settings
+from app.engine.common import (
+    DEFAULT_STATE,
+    dump_state as _dump,
+    finish_cancelled as _finish_cancelled,
+    node_summary,
+    pause as _pause,
+    topological_order,
+    write_state as _write_state,
+)
 from app.models.flow import Flow
 from app.models.run import RunStatus
 from app.services.event_bus import event_bus, utc_now
 from app.services.run_repo import load_run, update_run
 
-DEMO_ANSWER = "已收到你的问题。当前是演示执行器：事件由本地桩生成，接入真实 LLM 后走 loop.py。"
+DEMO_ANSWER = "已收到你的问题。当前是演示执行器：事件由本地桩生成，真实模型运行请把 RUNNER 设为 loop。"
 DEMO_TOKENS = ("你好，", "这是 ", "流式 ", "token ", "输出。")
 TOKEN_COST = 0.00001  # 演示单价：每个 token 一分不到，仅用于打通成本统计
-
-DEFAULT_STATE = {
-    "cursor": 0,
-    "variables": {},
-    "tokens": 0,
-    "cost": 0.0,
-    "human_pending": None,
-    "current_node": None,
-}
-
-NODE_SUMMARY_KEYS = {
-    "llm": ["model", "temperature", "max_tokens"],
-    "prompt": ["template"],
-    "input": ["name", "type"],
-    "output": ["fields"],
-    "tool": ["tool_id", "timeout"],
-    "mcp": ["server_id", "tool_name"],
-    "knowledge": ["kb_id", "top_k", "rerank"],
-    "condition": ["expression"],
-    "loop": ["max_rounds"],
-    "human": ["message"],
-    "skill": ["flow_id"],
-}
-
-
-def topological_order(flow: Flow) -> list[str]:
-    indegree = {node.id: 0 for node in flow.nodes}
-    adjacency: dict[str, list[str]] = {node.id: [] for node in flow.nodes}
-    for edge in flow.edges:
-        if edge.source in adjacency and edge.target in indegree:
-            adjacency[edge.source].append(edge.target)
-            indegree[edge.target] += 1
-
-    queue = [node_id for node_id, degree in indegree.items() if degree == 0]
-    order: list[str] = []
-    while queue:
-        current = queue.pop(0)
-        order.append(current)
-        for nxt in adjacency[current]:
-            indegree[nxt] -= 1
-            if indegree[nxt] == 0:
-                queue.append(nxt)
-    # 有环时把剩余节点补到末尾，演示执行器不能因此卡死
-    order.extend(node_id for node_id in indegree if node_id not in order)
-    return order
-
-
-def node_summary(node_type: str, config: dict) -> dict:
-    return {
-        key: config[key]
-        for key in NODE_SUMMARY_KEYS.get(node_type, [])
-        if key in config
-    }
-
-
-async def _pause(stop: asyncio.Event, delay: float) -> None:
-    """可被取消令牌提前唤醒的 sleep。"""
-    if delay <= 0:
-        return
-    try:
-        await asyncio.wait_for(stop.wait(), timeout=delay)
-    except asyncio.TimeoutError:
-        pass
-
-
-def _dump(state: dict) -> str:
-    return orjson.dumps(state).decode()
-
-
-async def _write_state(run_id: str, state: dict) -> None:
-    await update_run(
-        run_id,
-        state_json=_dump(state),
-        token_usage=state["tokens"],
-        cost=round(state["cost"], 6),
-    )
-
-
-async def _finish_cancelled(run_id: str, state: dict) -> None:
-    await event_bus.emit(run_id, "run_failed", payload={"error": "用户取消", "cancelled": True})
-    await update_run(
-        run_id,
-        status=RunStatus.CANCELLED.value,
-        error="用户取消",
-        state_json=_dump(state),
-        finished_at=utc_now(),
-    )
 
 
 async def run_demo_flow(

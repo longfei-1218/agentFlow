@@ -14,6 +14,9 @@ interface RunStore {
   streamText: string;
   outputs: Record<string, unknown> | null;
   stats: RunStats | null;
+  /** 模型调用次数（后端 state.steps）：与 MAX_STEPS 同一口径 */
+  llmSteps: number;
+  maxSteps: number | null;
 
   reset: () => void;
   setRunId: (id: string | null) => void;
@@ -36,6 +39,8 @@ const initial = {
   streamText: "",
   outputs: null as Record<string, unknown> | null,
   stats: null as RunStats | null,
+  llmSteps: 0,
+  maxSteps: null as number | null,
 };
 
 export const useRunStore = create<RunStore>((set) => ({
@@ -47,13 +52,17 @@ export const useRunStore = create<RunStore>((set) => ({
   setStats: (stats) => set({ stats }),
 
   applyRunDetail: (run) =>
-    set({
-      runId: run.id,
-      status: run.status,
-      tokens: run.tokenUsage,
-      cost: run.costEstimate,
-      outputs: run.outputs ?? null,
-      error: run.error ?? null,
+    set((state) => {
+      const steps = Number((run.state as Record<string, unknown> | undefined)?.steps ?? state.llmSteps);
+      return {
+        runId: run.id,
+        status: run.status,
+        tokens: run.tokenUsage,
+        cost: run.costEstimate,
+        outputs: run.outputs ?? null,
+        error: run.error ?? null,
+        llmSteps: Number.isFinite(steps) ? steps : state.llmSteps,
+      };
     }),
 
   appendEvent: (event) =>
@@ -86,6 +95,8 @@ export const useRunStore = create<RunStore>((set) => ({
           next.status = "succeeded";
           next.tokens = Number(event.payload.tokens ?? state.tokens);
           next.cost = Number(event.payload.cost ?? state.cost);
+          next.llmSteps = Number(event.payload.steps ?? state.llmSteps);
+          next.maxSteps = event.payload.maxSteps ? Number(event.payload.maxSteps) : state.maxSteps;
           next.outputs = (event.payload.outputs as Record<string, unknown>) ?? null;
           next.activeNodeId = null;
           break;
@@ -104,7 +115,7 @@ export const useRunStore = create<RunStore>((set) => ({
     }),
 }));
 
-/** 运行中由事件推断的「执行步数」：一个节点启动即一步。 */
+/** 运行中由事件推断的「节点执行数」：一个节点启动即一步（注意不等于模型调用次数）。 */
 export function countSteps(events: RunEvent[]): number {
   return events.filter((event) => event.type === "node_started").length;
 }
