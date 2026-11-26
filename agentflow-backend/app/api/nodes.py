@@ -3,6 +3,7 @@ from fastapi import APIRouter, HTTPException
 
 from app.nodes.registry import all_specs, categories, get_spec
 from app.services.settings_repo import get_llm_config
+from app.services.tool_repo import list_tools
 
 router = APIRouter(prefix="/node-types", tags=["node-types"])
 
@@ -14,6 +15,8 @@ async def list_node_types():
         "types": [spec.to_api() for spec in all_specs()],
         "categories": categories(),
         "llmConfigured": llm.configured,
+        # 前端用它判断「工具下拉有没有东西可选」：0 个时直接引导去工具管理新建
+        "toolsCount": len(await list_tools(only_enabled=True)),
     }
 
 

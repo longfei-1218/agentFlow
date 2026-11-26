@@ -1,6 +1,6 @@
 # AgentFlow Studio · 后端
 
-FastAPI + aiosqlite + sse-starlette + httpx。当前进度：**B2 完成**（节点 Schema + LLM 配置 + 手写 Agent Loop）。
+FastAPI + aiosqlite + sse-starlette + httpx。当前进度：**B3 完成**（工具注册表 + 真 Function Calling）。
 
 ## 已实现
 
@@ -13,7 +13,13 @@ FastAPI + aiosqlite + sse-starlette + httpx。当前进度：**B2 完成**（节
 **节点与设置（R2）**
 - `app/nodes/registry.py`：11 类节点各一个 Pydantic 配置模型，`GET /api/node-types` 直接导出 JSON Schema + `defaultConfig` + `implemented`
 - `GET /api/settings/llm` / `PUT /api/settings/llm` / `POST /api/settings/llm/test` / `GET /api/settings/llm/models`：Key 存库（`settings` 表），只回脱敏预览；优先级 **DB > .env**；`/models` 把网关支持的模型清单交给前端做下拉（网关不支持该接口时返回 `ok:false`，前端退回手填）
-- `app/services/llm.py`：OpenAI 兼容 `/chat/completions` 流式（httpx，不引 SDK）；优先用 provider 的 `usage` 计费，拿不到按字符估算并在收尾补校准帧
+- `app/services/llm.py`：OpenAI 兼容 `/chat/completions` 流式（httpx，不引 SDK）；优先用 provider 的 `usage` 计费，拿不到按字符估算并在收尾补校准帧；支持 `tools` 数组与**分片**的 `delta.tool_calls` 累积
+
+**工具（R3）**
+- `app/models/tool.py` + `app/services/tool_repo.py`：工具定义（`kind=http|builtin`、method/url/headers/body 模板、`params_schema`、超时、重试、退避、幂等 TTL、风险、启用）存 `tools.definition_json`；调用记录存 `tool_invocations`
+- `app/api/tools.py`：`GET/POST /api/tools`、`PUT/DELETE /api/tools/{id}`、`GET /api/tools/builtins`、`GET /api/tools/invocations`、`POST /api/tools/{id}/test`
+- `app/services/tool_runner.py`：按 `params_schema` 校验必填/类型/enum → 幂等查缓存（`sha1(tool_id + 排序参数)` + TTL）→ 带超时与指数退避重试地调用（**只重试连接错误/超时/5xx，4xx 立即失败**）→ 落调用记录；内置 `echo` / `now` / `calc`（`calc` 用 AST 白名单，不用 `eval`）
+- `app/engine/loop.py`：tool 节点真执行（参数模板 `{{var}}` 插值 → JSON 解析 → 调用）；llm 节点真 Function Calling（模型要工具 → 执行 → 回填 `tool` 消息 → 再问一次），**MAX_STEPS 逐轮计数**；FC 里的工具失败回给模型继续，tool 节点失败则 run 失败
 
 **Run**
 - `GET /api/runs` 支持 `flow_id / status / started_after / started_before / limit`
@@ -25,10 +31,10 @@ FastAPI + aiosqlite + sse-starlette + httpx。当前进度：**B2 完成**（节
 
 **执行器**
 - `app/engine/executor.py`：`RUNNER=loop|demo` 选择器
-- `app/engine/loop.py`：手写 Agent Loop。input / prompt / llm / output / human 真执行；`MAX_STEPS` 数 **模型调用次数**，超限抛 `StepLimitExceeded` → `run_failed{code:STEP_LIMIT_EXCEEDED}`（服务不崩）
+- `app/engine/loop.py`：手写 Agent Loop。input / prompt / llm / tool / output / human 真执行；`MAX_STEPS` 数 **模型调用次数**（FC 的多轮也逐轮计数），超限抛 `StepLimitExceeded` → `run_failed{code:STEP_LIMIT_EXCEEDED}`（服务不崩）
 - `app/engine/common.py`：拓扑排序、state 快照、可取消等待、终态收尾（demo 与 loop 共用）
 - `app/engine/demo_runner.py`：确定性桩，不联网，用于回归与前端联调
-- 占位节点（tool 发 stub 事件；mcp / skill / knowledge / condition / loop 直通并标 `skipped`）留到 B3–B5
+- 占位节点（mcp / skill / knowledge / condition / loop 直通并标 `skipped`）留到 B4–B5
 - `tools/fake_llm.py`：本地假模型（OpenAI 兼容，仅验收用，不参与产品逻辑）
 
 ## 关键设计
@@ -45,6 +51,11 @@ FastAPI + aiosqlite + sse-starlette + httpx。当前进度：**B2 完成**（节
 | 估算 token 与真实用量不一致 | 收尾补一帧带符号差额，最终以 provider `usage` 为准 |
 | 节点写死模型名 → 换网关就 400 | 优先级 **节点 config > 系统设置 > `.env`**，默认模板里 `model` 留空；失败时 `run_failed` 带 `model / nodeId / modelFromNode / hint`，错误文案直接说清「哪个节点覆盖了什么、怎么改」 |
 | 旧标签页把配置覆盖回去 | `PUT` 接受可选 `baseUpdatedAt`（调用方加载时的 `updatedAt`）；不一致回 409 `FLOW_STALE` 且不写库。前端点运行只在 `dirty` 时保存，并在窗口获得焦点时静默同步 |
+| 工具定义与执行参数散成两套 | `tools.definition_json` 存整份 ToolDef，name/kind/schema/endpoint 只是冗余列；节点只引用 `tool_id`，超时/重试/幂等永远跟着工具走 |
+| 老库升级要删数据 | `Database.connect()` 里按 `PRAGMA table_info` 补列（R3 给 `tools` 加了 `definition_json`/`created_at`/`updated_at`），不删库 |
+| 重复调用造成副作用 | 幂等 key = `sha1(tool_id + 排序参数)`，TTL 内命中直接复用上次成功结果，记录 `idemHit=1/attempts=0`；`none` 策略可关掉 |
+| 工具失败要不要弄挂 run | 区分意图：tool 节点是用户写死的调用，失败即 `run_failed`；FC 里的失败作为 `tool` 消息回给模型，让它改参数重试 |
+| 两次 run 的 state 串味 | `DEFAULT_STATE` 里 `tool_calls/tool_errors` 是 list，浅拷贝会共享；改成 `copy.deepcopy` 并在测试里守住 |
 
 ## 本地启动
 
@@ -62,18 +73,20 @@ Swagger: http://localhost:8000/docs
 ## 测试
 
 ```bash
-.venv\Scripts\python.exe -m pytest      # 32 passed
+.venv\Scripts\python.exe -m pytest      # 43 passed
 ```
 
 覆盖：Flow 版本语义与校验、节点配置校验、节点 Schema 导出、Key 脱敏与优先级、
 SSE 到终态、筛选、节点统计、取消、审批续跑、序号恢复、真流式 token 帧与 usage 校准、
-`MAX_STEPS` 守卫、未配 Key 的 409 与无模型流程照常可跑。
+`MAX_STEPS` 守卫、未配 Key 的 409 与无模型流程照常可跑、
+工具 CRUD 与重名 409、内置 Schema 覆盖、参数缺失拒绝、5xx 重试到第 3 次成功、**4xx 不重试**、
+幂等命中、tool 节点真执行并落调用记录、工具不存在失败、**FC 两轮回路**、FC 逐轮计步、两次 run 的 state 隔离。
 
 ## 下一步
 
 | 步 | 内容 |
 |---|---|
-| B3 | tool 节点：FC 工具 CRUD、超时、重试、幂等 |
+| B3 ✅ | 工具注册表：FC 工具 CRUD、超时、重试、幂等、真 Function Calling |
 | B4 | LangGraph 编译 + checkpointer 真中断续跑（condition / loop 交给图引擎） |
 | B5 | MCP 客户端、RAG 知识库、skill 子流程 |
 | B6 | 评测体系（三层采集器 / pass^k / judge / 门禁）与 Docker |

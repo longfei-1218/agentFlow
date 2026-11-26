@@ -198,7 +198,7 @@ cd agentflow-backend
 
 - **`MAX_STEPS` 数的是模型调用次数**，不是节点数：3 节点流程只算 1 步。要复现拦截，画两段 `llm` 串联并把 `MAX_STEPS` 调成 1，第二次调用会失败为 `run_failed{code:STEP_LIMIT_EXCEEDED}`，服务本身不受影响。
 - **Token 会先估算后校准**：流式为实时性按字符估算（中文 1 字≈1 token），provider 返回 `usage` 后会补一帧差额（可能是负数），所以运行中看到的数字在结束时可能**回落**到真实值。最终 `runs.token_usage` 与 `/stats` 汇总保持一致。
-- **占位节点不假装执行**：tool 会发 `tool_call` / `tool_result`（标注 `stub:true`），mcp / skill / knowledge / condition / loop 发 `node_completed{skipped:true}` 说明留到 R3–R5；`/api/node-types` 里 `implemented:false` 是同一事实的另一处体现。
+- **占位节点不假装执行**：R2 期间 tool 会发 `tool_call` / `tool_result`（标注 `stub:true`）；**R3 起 tool 已经是真执行**，`stub` 字段不再出现。mcp / skill / knowledge / condition / loop 仍发 `node_completed{skipped:true}`，留到 R4–R5；`/api/node-types` 里 `implemented:false` 是同一事实的另一处体现。
 - **后端 `--reload` 在这台机器上偶发不生效**（WatchFiles 打印 Reloading 但子进程没换）。改了 `app/` 下的代码后如果行为没变，直接重启后端，不要怀疑代码。
 - **「模型」字段的优先级是：节点 config > 系统设置 > `.env`**。节点里留空才会走系统默认。默认模板已经改成留空；但如果你的流程是 R2 早期建的，节点里可能还留着 `gpt-4o-mini`，换成 DeepSeek 网关就会 400 —— 选中节点点一下红字那行即可修正。
 - **网关模型列表来自 `GET /api/settings/llm/models`**（后端打一次 `/models`）。网关不实现该接口时下拉退回手填输入框，不影响保存与运行。
@@ -207,7 +207,69 @@ cd agentflow-backend
 
 ## R3 · 工具层（B3） + 工具管理页
 
-状态：待做。
+状态：**已完成**（后端 + 前端切片 + 真 FC 联调，均已实测）
+
+### 0. 这轮改了什么
+
+后端：新增 `app/models/tool.py`（ToolDef / 内置工具 Schema / 调用记录 / 试跑请求）、`app/services/tool_repo.py`（tools 与 tool_invocations 存取，**老库自动补列**，不用删库）、`app/services/tool_runner.py`（参数校验 → 幂等查缓存 → 带超时重试调用 → 落记录；内置 echo/now/calc 与 HTTP 两种实现）、`app/api/tools.py`（CRUD + `/{id}/test` + `/invocations` + `/builtins`）。
+
+`app/services/llm.py`：`stream_completion` 支持 `tools`，并按 index 累积**分片**的 `delta.tool_calls`，整轮结束交出组装好的调用列表；参数分片的 token 也计入用量。`app/engine/loop.py`：llm 节点实现真 Function Calling 回路（模型要工具 → 执行 → 回填 tool 消息 → 再问一次），**MAX_STEPS 改成逐轮计数**；tool 节点改成真执行；工具错误在 FC 里回给模型、在 tool 节点里让 run 失败。`GET /api/node-types` 增加 `toolsCount`。
+
+前端：新增 `api/tools.ts`、`store/toolStore.ts`、`components/tools/ToolEditorModal.tsx`、`components/tools/ToolTestModal.tsx`；`pages/ToolsPage.tsx` 从占位页改成真页面（列表 / 新建 / 编辑 / 试跑 / 调用记录 / 删除）；`ConfigPanel` 把 tool 节点的 `tool_id` 换成注册表下拉、llm 节点新增「绑定工具」勾选；`Shell` 启动加载工具清单。tool 节点在节点库不再带「占位」标。
+
+### A. 自动化
+
+```powershell
+cd agentflow-backend
+.venv\Scripts\python.exe -m pytest          # 期望 43 passed（32 + R3 新增 11）
+
+cd ..\agentflow-frontend
+npm run typecheck                           # 无输出
+npm run build                               # ✓ built
+```
+
+| 用例文件 | 守的是什么 |
+|---|---|
+| `test_tools.py`（11 条） | 工具 CRUD 与重名 409、内置工具 Schema 由后端覆盖、**必填参数缺失被拒**、503 连击按 retries 重试到第 3 次成功、**4xx 绝不重试**、幂等第二次命中且只打一次网络、tool 节点真执行并落调用记录（无 `stub`）、工具不存在时 run 失败且 code 可读、**FC 两轮回路**（工具结果作为 tool 消息回填）、**FC 轮次计入 MAX_STEPS**、两次 run 的 state 不共享（DEFAULT_STATE 浅拷贝踩坑） |
+
+### B. 页面验收（**先看这节：打开哪个页面，验哪些功能**）
+
+库里已备好：工具 `echo`（内置）、`now_time`（内置）；流程
+- `flow_921e8b49`「R3 工具节点演示」：input → tool(echo, `{"text":"{{query}}"}`) → output
+- `flow_fd2812d1`「R3 FC 演示（模型自选工具）」：input → llm(绑定 echo) → output
+
+| # | 打开哪个页面 | 做什么 | 期望 | 本轮实测 |
+|---|---|---|---|---|
+| 1 | `http://127.0.0.1:5173/tools` | 看工具表 | 2 个工具，类型 builtin、目标 `builtin:echo` / `builtin:now`、超时/重试、幂等 `key·600s`、风险、启用状态齐全 | ✅ 2 条 |
+| 2 | 同页，点「新建工具」 | 选「内置」→ 选 `calc` → 保存 | 列表 +1，名称即模型看到的 function name；参数 Schema 由后端给（只读展示） | ✅ 保存成功、Schema 只读 |
+| 3 | 同页，随便一个工具点「试跑」 | 直接点「执行一次」 | 成功、尝试 **1** 次、耗时、结果 JSON；缺必填参数时给出「缺少必填参数: text」 | ✅ `{"echo":"test"}` |
+| 4 | 同页试跑弹层 | 勾「走幂等缓存」→ 连点两次「执行一次」 | 第二次显示**幂等命中**、尝试 **0** 次、结果与第一次一致 | ✅ 尝试 0 / 幂等命中 |
+| 5 | 同页新建 HTTP 工具 | URL 填 `http://127.0.0.1:9/x`、超时 500ms、重试 0 → 试跑 | 失败但不弹 500：显示状态、尝试 1、`HTTP 或连接失败` 原因，方便判断是不是超时设小了 | ✅ 可读失败原因 |
+| 6 | 同页「最近调用记录」 | 看刚跑出来的行 | `tool_1` / `llm_1` 两种来源、attempts、耗时、幂等「命中」、可点 runId 跳到回放 | ✅ 三行、命中行 attempts 0 |
+| 7 | `http://127.0.0.1:5173/flows/flow_921e8b49` | 选中画布里的「工具」节点 | 配置面板的「工具」是**注册表下拉**（echo · 内置 / now_time · 内置），不是手填 id；`参数模板` 是 JSON 文本域，插值示例在说明里 | ✅ 下拉 + `tool.config.v1` |
+| 8 | 同页点「运行」 | 实时日志 | `tool_call`（`source:"node"`、带 args）→ `tool_result`（`ok:true`、`latencyMs`、`attempts`）；**没有 `stub`**；输出是 `{"echo": ...}` | ✅ 事件链路完整 |
+| 9 | `http://127.0.0.1:5173/flows/flow_fd2812d1` | 选中「模型」节点 | 「绑定工具」是勾选列表，`echo` 已勾；底部写「已绑定 1 个 · 工具失败不中断运行」 | ✅ 勾选状态正确 |
+| 10 | 同页点「运行」 | 运行面板 + 日志 | 「模型调用 **2/8**」（FC 两轮）；日志里 `tool_call` 的 `source:"llm"` 且带 `callId`，随后 `tool_result` 是 echo 的结果；最终答案基于工具返回内容 | ✅ 2/8、1274 tokens、¥0.0042 |
+| 11 | `http://127.0.0.1:5173/runs/{runId}` | 回放 | 工具事件按 seq 出现在时间线里，终态「成功」 | ✅ |
+| 12 | `http://127.0.0.1:8000/docs` | 接口自查 | `GET /api/tools`、`GET /api/tools/builtins`、`GET /api/tools/invocations`、`POST /api/tools`、`POST /api/tools/{id}/test`、`GET /api/node-types`（`toolsCount`） | ✅ 路由齐全 |
+
+**最快只验后端**：
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8000/api/tools/builtins
+Invoke-RestMethod "http://127.0.0.1:8000/api/tools/invocations?limit=5"
+Invoke-RestMethod -Uri http://127.0.0.1:8000/api/tools/{id}/test -Method Post -ContentType application/json -Body '{"args":{"text":"hi"}}'
+```
+
+### C. 口径与已知说明
+
+- **超时 / 重试 / 幂等是「工具定义」的属性，不是节点属性**：同一个工具在任何流程里行为一致。节点只填 `tool_id` 与参数模板。
+- **重试只发生在「可重试」的失败上**：连接错误、超时、5xx 重试；**4xx 立即失败**（参数/鉴权问题重试只是重复挨骂）。
+- **幂等 key = sha1(工具 id + 排序后的参数)**，TTL 内同参数直接复用上次成功结果，记一行 `idemHit=true / attempts=0`。它证明的是「重复调用不会重复执行」，不是业务幂等（订单去重那种要业务自己给幂等键）。
+- **工具失败的两种处理**：`tool` 节点失败 → 整个 run 失败（`TOOL_NOT_FOUND` / `TOOL_ARGS_INVALID` / `TOOL_TIMEOUT` / `TOOL_INVOKE_FAILED`），错误里带节点 id；FC 里的工具失败 → 作为 `tool` 消息回给模型，让它自己改参数重试，run 继续（失败同时出现在「调用记录」里）。
+- **FC 的每一轮模型调用都算一步**：`MAX_STEPS=1` 时第二轮会被拦，错误文案写明「已进行 N 轮工具调用」。
+- **工具执行没有沙箱**：HTTP 工具能打任意地址（这是本地原型，别指向不可信内网）。`high` 风险工具请在流程里加 human 节点审批。
+- MCP server 列表页与 mcp 节点仍是 R5；knowledge / skill / condition / loop 仍是占位。
 
 ## R4 · LangGraph（B4）
 

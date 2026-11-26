@@ -1,5 +1,5 @@
--- AgentFlow Studio 表结构（9 张表，按可迁移设计，不用 SQLite 专有语法）
--- 已启用：flows / runs / run_events / settings；其余表先建好，避免后续迁移。
+-- AgentFlow Studio 表结构（10 张表，按可迁移设计，不用 SQLite 专有语法）
+-- 已启用：flows / runs / run_events / settings / tools / tool_invocations；其余表先建好，避免后续迁移。
 
 CREATE TABLE IF NOT EXISTS flows (
     id TEXT PRIMARY KEY,
@@ -52,8 +52,33 @@ CREATE TABLE IF NOT EXISTS tools (
     schema_json TEXT NOT NULL,
     endpoint TEXT,
     risk TEXT NOT NULL DEFAULT 'low',
-    enabled INTEGER NOT NULL DEFAULT 1
+    enabled INTEGER NOT NULL DEFAULT 1,
+    -- 整份 ToolDef（含 method/headers/body/超时/重试/幂等）都在这里，上面几列只是便于筛选的冗余
+    definition_json TEXT,
+    created_at TEXT,
+    updated_at TEXT
 );
+
+CREATE TABLE IF NOT EXISTS tool_invocations (
+    id TEXT PRIMARY KEY,
+    tool_id TEXT NOT NULL,
+    tool_name TEXT NOT NULL,
+    run_id TEXT,
+    node_id TEXT,
+    args_json TEXT NOT NULL DEFAULT '{}',
+    status TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    latency_ms INTEGER NOT NULL DEFAULT 0,
+    http_status INTEGER,
+    result_json TEXT,
+    error TEXT,
+    idem_key TEXT,
+    idem_hit INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_inv_tool ON tool_invocations(tool_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_inv_idem ON tool_invocations(idem_key, created_at);
 
 CREATE TABLE IF NOT EXISTS mcp_servers (
     id TEXT PRIMARY KEY,

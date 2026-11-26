@@ -35,7 +35,7 @@ def stub_llm(monkeypatch):
     monkeypatch.setattr(settings, "LLM_API_KEY", "sk-test-1234567890abcdef")
     monkeypatch.setattr(settings, "RUNNER", "loop")
 
-    async def fake_stream(config, messages, *, model=None, temperature=None, max_tokens=None):
+    async def fake_stream(config, messages, *, model=None, temperature=None, max_tokens=None, tools=None):
         yield LLMDelta(delta_tokens=5, delta_prompt_tokens=5, cost=0.00001)
         for piece in ("你好，", "这是测试回答。"):
             yield LLMDelta(text=piece, delta_tokens=2, delta_completion_tokens=2, cost=0.00002)

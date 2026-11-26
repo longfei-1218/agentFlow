@@ -7,6 +7,7 @@ MAX_STEPS 的语义：一次 LLM 调用算一步。它防的是「模型被工�
 不是「节点数量上限」——线性的 10 个节点流程不该因为 MAX_STEPS=8 就被拦。
 """
 import asyncio
+import copy
 from typing import Any
 
 import orjson
@@ -23,12 +24,13 @@ from app.engine.common import (
 )
 from app.models.flow import Flow, FlowNode
 from app.models.run import RunStatus
+from app.services import tool_repo, tool_runner
 from app.services.event_bus import event_bus, utc_now
 from app.services.llm import LLMConfig, LLMError, stream_completion
 from app.services.run_repo import load_run, update_run
 
-# R2 只把拓扑里的「线性可执行」部分跑通；这几类节点的执行语义留到 R3/R4/R5，
-# 先按直通占位处理，既不假装成功，也不让用户以为它们已经生效。
+# R3 已接管 tool；这几类节点的执行语义留到 R4/R5，先按直通占位处理，
+# 既不假装成功，也不让用户以为它们已经生效。
 PLACEHOLDER_NODES = {"condition", "loop", "mcp", "skill", "knowledge"}
 
 
@@ -66,7 +68,10 @@ async def run_loop(
     resume_from: dict | None = None,
     llm_config: LLMConfig | None = None,
 ) -> None:
-    state = {**DEFAULT_STATE, **(resume_from or {})}
+    # deepcopy：DEFAULT_STATE 里的 tool_calls/tool_errors 是 list，
+    # 浅拷贝会让两次 run 共享同一个列表（第一次的调用记录泄漏进第二次的 state）
+    state = copy.deepcopy(DEFAULT_STATE)
+    state.update(copy.deepcopy(resume_from or {}))
     state["variables"] = dict(state.get("variables") or {})
     order = topological_order(flow)
     node_map = {node.id: node for node in flow.nodes}
@@ -124,13 +129,10 @@ async def run_loop(
                 state["variables"]["text"] = render_template(template, state["variables"])
 
             elif node.type == "llm":
-                if state["steps"] >= limit:
-                    raise StepLimitExceeded(
-                        f"超过单次运行的最大步数 MAX_STEPS={limit}，已拦截本次模型调用"
-                    )
-                state["steps"] += 1
+                # 步数守卫搬进 _run_llm_node：一次模型调用算一步，
+                # Function Calling 的多轮也是多次调用，必须逐轮计数而不是只算一次
                 await _run_llm_node(
-                    run_id, node, state, llm_config, stop, completed_payload
+                    run_id, node, state, llm_config, stop, completed_payload, limit
                 )
                 if stop.is_set():
                     await finish_cancelled(run_id, state)
@@ -166,16 +168,9 @@ async def run_loop(
                 state["variables"]["approved"] = True
 
             elif node.type == "tool":
-                # R3 接管工具执行；这一版只把「调用点」出现在事件流里，结果标明是占位
-                tool_id = str(node.config.get("tool_id") or "unspecified_tool")
-                await event_bus.emit(
-                    run_id, "tool_call", node.id,
-                    {"name": tool_id, "args": state["variables"]},
-                )
-                result = f"工具 {tool_id} 尚未注册（R3 工具层实装后可执行）"
-                await event_bus.emit(run_id, "tool_result", node.id, {"result": result, "stub": True})
+                result = await _run_tool_node(run_id, node, state)
                 state["variables"]["result"] = result
-                completed_payload = {"ok": True, "stub": True}
+                completed_payload = {"ok": True, "result": result}
 
             elif node.type in PLACEHOLDER_NODES:
                 completed_payload = {
@@ -264,6 +259,24 @@ async def run_loop(
             state_json=dump_state(state),
             finished_at=utc_now(),
         )
+    except tool_runner.ToolError as exc:
+        node_id = state.get("current_node")
+        message = (
+            f"{exc}（节点 {node_id} 的工具调用失败，详见「工具管理」的调用记录；"
+            "可先在工具管理里试跑该工具确认参数与超时设置）"
+        )
+        await event_bus.emit(
+            run_id,
+            "run_failed",
+            payload={"error": message, "code": exc.code, "nodeId": node_id, "toolError": True},
+        )
+        await update_run(
+            run_id,
+            status=RunStatus.FAILED.value,
+            error=message,
+            state_json=dump_state(state),
+            finished_at=utc_now(),
+        )
     except asyncio.CancelledError:
         await finish_cancelled(run_id, state)
         raise
@@ -286,30 +299,129 @@ async def _run_llm_node(
     llm_config: LLMConfig,
     stop: asyncio.Event,
     completed_payload: dict,
+    limit: int,
 ) -> None:
-    """流式调用并逐帧写事件；tokens/cost 以 provider 的校准帧为准。"""
+    """一轮或多轮模型调用。绑了工具时模型自己决定调用，我们把结果回填后再问一次。
+
+    MAX_STEPS 在这里逐轮递增：不用 FC 时只有一次递增（行为和 R2 一致）；
+    用了 FC，模型每追问一次就记一步，避免「工具喂结果 → 模型继续要 → 无限循环」。
+    """
     model = str(node.config.get("model") or "") or llm_config.model
     # 先记到 state：请求失败时也要能回答「这次到底用了哪个模型、是不是节点覆盖来的」
     state["model"] = model
     state["model_override"] = str(node.config.get("model") or "") or None
     temperature = node.config.get("temperature")
     max_tokens = node.config.get("max_tokens")
-    messages = build_messages(node, state["variables"])
 
+    tool_ids = [str(item) for item in (node.config.get("tool_ids") or [])]
+    tools = await tool_runner.fc_schemas(tool_ids) if tool_ids else []
+    bound_tools = await tool_repo.get_tools_by_ids(tool_ids) if tool_ids else []
+
+    messages = build_messages(node, state["variables"])
+    rounds = 0
+    answer = ""
+    usage: dict | None = None
+
+    while True:
+        if state["steps"] >= limit:
+            raise StepLimitExceeded(
+                f"超过单次运行的最大步数 MAX_STEPS={limit}，已拦截本次模型调用"
+                + (f"（已进行 {rounds} 轮工具调用）" if rounds else "")
+            )
+        state["steps"] += 1
+        rounds += 1
+
+        text, tool_calls, call_usage = await _stream_once(
+            run_id,
+            node,
+            state,
+            llm_config,
+            stop,
+            messages,
+            model=model or None,
+            temperature=float(temperature) if temperature is not None else None,
+            max_tokens=int(max_tokens) if max_tokens is not None else None,
+            tools=tools or None,
+        )
+        if call_usage:
+            usage = call_usage
+        if stop.is_set():
+            return
+
+        if not tool_calls:
+            answer = text
+            break
+
+        # 把「模型想调工具」这件事写进消息历史：OpenAI 协议要求 assistant.tool_calls 与 tool 消息成对
+        messages.append(
+            {
+                "role": "assistant",
+                "content": text or None,
+                "tool_calls": [
+                    {
+                        "id": call["id"],
+                        "type": "function",
+                        "function": {"name": call["name"], "arguments": call["arguments"]},
+                    }
+                    for call in tool_calls
+                ],
+            }
+        )
+        for call in tool_calls:
+            messages.append(
+                await _exec_fc_tool(run_id, node, state, call, bound_tools)
+            )
+
+    state["variables"]["text"] = answer
+    completed_payload.update(
+        {
+            "model": model,
+            "usage": usage
+            or {
+                "promptTokens": state["prompt_tokens"],
+                "completionTokens": state["completion_tokens"],
+                "estimated": True,
+            },
+            "chars": len(answer),
+            "modelCalls": rounds,
+            "toolCalls": rounds - 1 if rounds > 1 else 0,
+            "boundTools": [tool.name for tool in bound_tools],
+        }
+    )
+
+
+async def _stream_once(
+    run_id: str,
+    node: FlowNode,
+    state: dict,
+    llm_config: LLMConfig,
+    stop: asyncio.Event,
+    messages: list[dict],
+    *,
+    model: str | None,
+    temperature: float | None,
+    max_tokens: int | None,
+    tools: list[dict] | None,
+) -> tuple[str, list[dict], dict | None]:
+    """调一次模型并把 token 帧写进事件流。返回 (文本, 工具调用, usage)。"""
     text_parts: list[str] = []
+    tool_calls: list[dict] = []
     usage: dict | None = None
 
     async for delta in stream_completion(
         llm_config,
         messages,
-        model=model or None,
-        temperature=float(temperature) if temperature is not None else None,
-        max_tokens=int(max_tokens) if max_tokens is not None else None,
+        model=model,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        tools=tools,
     ):
         if stop.is_set():
             break
         if delta.text:
             text_parts.append(delta.text)
+        if delta.tool_calls:
+            tool_calls = delta.tool_calls
         if delta.text or delta.delta_tokens or delta.cost:
             # 只带用量的校准帧也要进事件流：否则「运行卡片的总 token」与节点统计会对不上
             await event_bus.emit(
@@ -327,21 +439,151 @@ async def _run_llm_node(
         if delta.usage:
             usage = delta.usage
 
-    answer = "".join(text_parts)
-    state["variables"]["text"] = answer
-    state["model"] = model
-    completed_payload.update(
+    return "".join(text_parts), tool_calls, usage
+
+
+async def _exec_fc_tool(
+    run_id: str,
+    node: FlowNode,
+    state: dict,
+    call: dict,
+    bound_tools: list,
+) -> dict:
+    """执行模型要的那次工具调用，返回要回填给模型的 tool 消息。
+
+    工具失败**不**让整个 run 挂掉：把错误作为 tool 结果回给模型，
+    它才有机会改参数重试——这正是 Agent 该有的行为。失败细节另外落调用记录。
+    """
+    name = str(call.get("name") or "")
+    raw_args = call.get("arguments") or "{}"
+    try:
+        args = orjson.loads(raw_args) if isinstance(raw_args, str) else dict(raw_args)
+        if not isinstance(args, dict):
+            raise tool_runner.ToolArgsError("模型给的 arguments 不是 JSON 对象")
+    except orjson.JSONDecodeError as exc:
+        args = {}
+        error_text = f"参数不是合法 JSON：{exc}"
+        await event_bus.emit(
+            run_id, "tool_call", node.id,
+            {"tool": name, "args": raw_args, "callId": call.get("id"), "source": "llm"},
+        )
+        await event_bus.emit(
+            run_id, "tool_result", node.id,
+            {"tool": name, "ok": False, "error": error_text, "callId": call.get("id")},
+        )
+        return {"role": "tool", "tool_call_id": call.get("id"), "content": f"ERROR: {error_text}"}
+
+    await event_bus.emit(
+        run_id, "tool_call", node.id,
+        {"tool": name, "args": args, "callId": call.get("id"), "source": "llm"},
+    )
+    try:
+        tool = await tool_runner.resolve_by_name(bound_tools, name)
+        invocation = await tool_runner.invoke(
+            tool, args, run_id=run_id, node_id=node.id
+        )
+    except tool_runner.ToolError as exc:
+        await event_bus.emit(
+            run_id, "tool_result", node.id,
+            {"tool": name, "ok": False, "error": str(exc), "code": exc.code, "callId": call.get("id")},
+        )
+        state.setdefault("tool_errors", []).append({"tool": name, "error": str(exc)})
+        return {"role": "tool", "tool_call_id": call.get("id"), "content": f"ERROR: {exc}"}
+
+    content = (
+        invocation.result
+        if isinstance(invocation.result, str)
+        else orjson.dumps(invocation.result).decode()
+    )
+    await event_bus.emit(
+        run_id, "tool_result", node.id,
         {
-            "model": model,
-            "usage": usage
-            or {
-                "promptTokens": state["prompt_tokens"],
-                "completionTokens": state["completion_tokens"],
-                "estimated": True,
-            },
-            "chars": len(answer),
+            "tool": name,
+            "ok": True,
+            "result": invocation.result,
+            "latencyMs": invocation.latency_ms,
+            "attempts": invocation.attempts,
+            "idemHit": invocation.idem_hit,
+            "callId": call.get("id"),
+        },
+    )
+    state.setdefault("tool_calls", []).append(
+        {
+            "tool": name,
+            "args": args,
+            "status": invocation.status,
+            "attempts": invocation.attempts,
+            "latencyMs": invocation.latency_ms,
+            "idemHit": invocation.idem_hit,
         }
     )
+    return {"role": "tool", "tool_call_id": call.get("id"), "content": content}
+
+
+async def _run_tool_node(run_id: str, node: FlowNode, state: dict) -> str:
+    """tool 节点：参数模板插值 → 强校验 → 带超时重试幂等地执行。
+
+    和 FC 的差别：这里是用户写死的固定调用，失败了就让 run 失败（错误要显眼），
+    而不是悄悄回给模型——用户没有模型可以替他重试。
+    """
+    tool_id = str(node.config.get("tool_id") or "")
+    if not tool_id:
+        raise tool_runner.ToolError("tool 节点未选择工具", code="TOOL_NOT_CONFIGURED")
+
+    tool = await _load_tool_or_fail(tool_id)
+    args = _parse_args_template(str(node.config.get("args_template") or "{}"), state["variables"])
+
+    await event_bus.emit(
+        run_id, "tool_call", node.id,
+        {"tool": tool.name, "toolId": tool.id, "args": args, "source": "node"},
+    )
+    invocation = await tool_runner.invoke(tool, args, run_id=run_id, node_id=node.id)
+    await event_bus.emit(
+        run_id, "tool_result", node.id,
+        {
+            "tool": tool.name,
+            "ok": True,
+            "result": invocation.result,
+            "latencyMs": invocation.latency_ms,
+            "attempts": invocation.attempts,
+            "idemHit": invocation.idem_hit,
+        },
+    )
+    state.setdefault("tool_calls", []).append(
+        {
+            "tool": tool.name,
+            "args": args,
+            "status": invocation.status,
+            "attempts": invocation.attempts,
+            "latencyMs": invocation.latency_ms,
+            "idemHit": invocation.idem_hit,
+        }
+    )
+    return (
+        invocation.result
+        if isinstance(invocation.result, str)
+        else orjson.dumps(invocation.result).decode()
+    )
+
+
+async def _load_tool_or_fail(tool_id: str):
+    try:
+        return await tool_repo.get_tool(tool_id)
+    except tool_repo.ToolNotFound as exc:
+        raise tool_runner.ToolError(str(exc), code="TOOL_NOT_FOUND") from exc
+
+
+def _parse_args_template(template: str, variables: dict) -> dict:
+    rendered = render_template(template, variables)
+    try:
+        parsed = orjson.loads(rendered or "{}")
+    except orjson.JSONDecodeError as exc:
+        raise tool_runner.ToolArgsError(
+            f"参数模板不是合法 JSON（插值后为 {rendered[:120]}）：{exc}"
+        ) from exc
+    if not isinstance(parsed, dict):
+        raise tool_runner.ToolArgsError("参数模板必须是一个 JSON 对象")
+    return parsed
 
 
 async def resume_loop(run_id: str, flow: Flow, stop: asyncio.Event) -> None:

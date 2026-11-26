@@ -34,6 +34,7 @@ class Database:
         await conn.execute("PRAGMA journal_mode = WAL")
         await conn.execute("PRAGMA foreign_keys = ON")
         await conn.executescript(INIT_SQL.read_text(encoding="utf-8"))
+        await _migrate(conn)
         await conn.commit()
         self._conn = conn
 
@@ -91,6 +92,33 @@ class Database:
 
 
 db = Database()
+
+
+async def _migrate(conn: aiosqlite.Connection) -> None:
+    """就地补列：CREATE TABLE IF NOT EXISTS 不会给已存在的旧表加字段。
+
+    R3 给 `tools` 加了 definition_json / created_at / updated_at，
+    老库（`tools` 表 6 列那版）不用删库，连上来时自动补齐即可。
+    """
+    cursor = await conn.execute("PRAGMA table_info(tools)")
+    try:
+        columns = {row[1] for row in await cursor.fetchall()}
+    finally:
+        await cursor.close()
+
+    additions = {
+        "definition_json": "TEXT",
+        "created_at": "TEXT",
+        "updated_at": "TEXT",
+    }
+    for name, ddl in additions.items():
+        if name not in columns:
+            await conn.execute(f"ALTER TABLE tools ADD COLUMN {name} {ddl}")
+
+    # 老行没有时间戳：补一个，列表排序才不会把历史工具顶到最前面
+    if "created_at" in additions and "created_at" not in columns:
+        await conn.execute("UPDATE tools SET created_at = '2026-01-01T00:00:00+00:00' WHERE created_at IS NULL")
+        await conn.execute("UPDATE tools SET updated_at = created_at WHERE updated_at IS NULL")
 
 
 async def get_db() -> aiosqlite.Connection:

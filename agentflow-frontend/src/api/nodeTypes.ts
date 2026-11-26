@@ -37,6 +37,8 @@ export interface NodeTypesPayload {
   types: NodeTypeSpec[];
   categories: string[];
   llmConfigured: boolean;
+  /** 已启用的工具数量：0 时配置面板会引导去工具管理新建 */
+  toolsCount?: number;
 }
 
 export const nodeTypesApi = {

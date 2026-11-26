@@ -32,6 +32,11 @@ class LLMConfigModel(NodeConfig):
     temperature: float = Field(default=0.7, title="Temperature", ge=0, le=2)
     max_tokens: int = Field(default=1024, title="Max tokens", ge=1, le=32000)
     system: str = Field(default="你是一个有帮助的助手。", title="System Prompt", min_length=1)
+    tool_ids: list[str] = Field(
+        default_factory=list,
+        title="绑定工具",
+        description="从工具管理里选；模型会自己决定何时调用，调用结果会回填给模型",
+    )
 
 
 class PromptConfig(NodeConfig):
@@ -44,9 +49,12 @@ class PromptConfig(NodeConfig):
 
 
 class ToolConfig(NodeConfig):
-    tool_id: str = Field(default="", title="工具 ID", description="R3 工具注册表里的标识")
-    timeout: float = Field(default=10, title="超时（秒）", ge=1, le=120)
-    retry: int = Field(default=2, title="重试次数", ge=0, le=5)
+    tool_id: str = Field(default="", title="工具", description="工具管理里注册的工具")
+    args_template: str = Field(
+        default="{}",
+        title="参数模板",
+        description='JSON，支持 {{变量}} 插值，如 {"city": "{{query}}"}；超时/重试/幂等跟随工具定义',
+    )
 
 
 class MCPConfig(NodeConfig):
@@ -157,8 +165,8 @@ _SPEC_LIST: list[NodeSpec] = [
     ),
     NodeSpec(
         type="tool", label="工具", icon="⚙", category="工具", color="#10b981",
-        description="函数调用工具（R3 实装，当前为占位）",
-        config_model=ToolConfig, inputs=["variables"], outputs=["result"], implemented=False,
+        description="调用工具管理里注册的工具（HTTP / 内置），带超时、重试与幂等",
+        config_model=ToolConfig, inputs=["variables"], outputs=["result"],
     ),
     NodeSpec(
         type="mcp", label="MCP", icon="⊕", category="工具", color="#10b981",
@@ -214,6 +222,8 @@ REQUIRED_NON_EMPTY = {
     ("prompt", "template"),
     ("condition", "expression"),
     ("human", "message"),
+    ("tool", "tool_id"),
+    ("tool", "args_template"),
 }
 
 

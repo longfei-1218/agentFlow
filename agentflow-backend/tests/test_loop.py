@@ -40,7 +40,7 @@ async def test_prompt_node_interpolates_before_llm(client, monkeypatch):
 
     captured: dict = {}
 
-    async def fake_stream(config, messages, *, model=None, temperature=None, max_tokens=None):
+    async def fake_stream(config, messages, *, model=None, temperature=None, max_tokens=None, tools=None):
         captured["messages"] = messages
         yield LLMDelta(delta_tokens=3, delta_prompt_tokens=3)
         yield LLMDelta(text="cat", delta_tokens=1, delta_completion_tokens=1)
@@ -139,7 +139,7 @@ async def test_model_mismatch_error_says_which_model_and_node(client, monkeypatc
     """网关不认节点里写死的模型时，报错必须自己说清「用了哪个模型、在哪个节点、怎么改」。"""
     from app.services.llm import LLMError
 
-    async def rejecting_stream(config, messages, *, model=None, temperature=None, max_tokens=None):
+    async def rejecting_stream(config, messages, *, model=None, temperature=None, max_tokens=None, tools=None):
         raise LLMError(
             f"模型接口返回 400: The supported API model names are deepseek-flash, but you passed {model}.",
             code="LLM_HTTP_ERROR",

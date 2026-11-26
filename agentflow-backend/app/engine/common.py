@@ -23,15 +23,17 @@ DEFAULT_STATE = {
     "human_pending": None,
     "current_node": None,
     "model": None,
+    "tool_calls": [],     # R3：本次 run 里真实执行过的工具调用摘要
+    "tool_errors": [],    # R3：FC 里回给模型的工具错误（不致命，但要留痕）
 }
 
 # 节点在 node_started 事件里露出的摘要字段：让界面显示「模型/温度」而不是整坨 config
 NODE_SUMMARY_KEYS = {
-    "llm": ["model", "temperature", "max_tokens"],
+    "llm": ["model", "temperature", "max_tokens", "tool_ids"],
     "prompt": ["template"],
     "input": ["name", "type"],
     "output": ["fields"],
-    "tool": ["tool_id", "timeout"],
+    "tool": ["tool_id", "args_template"],
     "mcp": ["server_id", "tool_name"],
     "knowledge": ["kb_id", "top_k", "rerank"],
     "condition": ["expression"],

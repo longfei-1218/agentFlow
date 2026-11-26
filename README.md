@@ -2,8 +2,8 @@
 
 Web 端 Agent 编排平台（本地单用户原型）：画布拖拽定义执行拓扑 → 右侧配置参数 → 运行并实时观测 token / 工具调用 / 中间结果 → 用评测集做回归。
 
-**当前进度：R2 完成**（节点 Schema 化 + LLM 系统配置 + 手写 Agent Loop 真流式运行）。
-下一步 R3：工具层（函数调用 CRUD + 超时/重试/幂等）。
+**当前进度：R3 完成**（工具注册表 CRUD + 超时/重试/幂等 + 真 Function Calling 回路 + 工具管理页）。
+下一步 R4：LangGraph（StateGraph 编译 + checkpointer 真中断续跑，condition / loop 交给图引擎）。
 
 ---
 
@@ -84,7 +84,8 @@ npm run dev
 | `/flows/:id` | 编辑器（左节点库 / 中画布 / 右配置面板 + 底部运行抽屉） |
 | `/runs` | 运行历史（按流程 / 状态筛选） |
 | `/runs/:id` | 运行回放（事件时序 + 节点耗时 + 审批卡） |
-| `/tools` `/knowledge` `/eval` | 资源与评测（R3 / R5 / R6 逐步实装） |
+| `/tools` | 工具管理（R3 已实装：注册/试跑/调用记录） |
+| `/knowledge` `/eval` | 知识库与评测（R5 / R6 实装） |
 
 全局弹层：右上「模型设置」——填 Base URL / 默认模型 / API Key，可测连通、可清空 Key。未配置时顶部有黄色提示，点运行会被后端 409 拦下并自动弹出该弹层。
 
@@ -130,10 +131,28 @@ CORS_ORIGINS=["http://localhost:5173"]
 
 ---
 
+## 配置工具（R3）
+
+工具是**注册表**里的一等对象，节点只引用 id，行为（超时/重试/幂等）跟着工具走。
+
+1. 打开 `http://localhost:5173/tools` → 「新建工具」
+2. 不想折腾外部接口就先选**内置**：`echo`（原样回显）、`now`（当前时间）、`calc`（四则运算）。参数 Schema 由后端给，不用填
+3. 点「试跑」→ 「执行一次」看到成功/尝试次数/耗时；勾上「走幂等缓存」连点两次，第二次应显示**幂等命中、尝试 0**
+4. 在编辑器里二选一接进流程：
+   - 拖一个 **tool 节点** → 选工具 → 填参数模板（JSON，支持 `{{query}}` 插值）→ 这是「用户写死的固定调用」
+   - 拖一个 **llm 节点** → 「绑定工具」勾上 → 这是「模型自己决定调不调」，模型每追问一轮算一步，受 `MAX_STEPS` 限制
+5. 运行后在「实时日志」看 `tool_call`（`source: node|llm`）→ `tool_result`（`latencyMs / attempts / idemHit`），「工具管理」的「最近调用记录」里能按 runId 翻回去
+
+HTTP 工具的关键字段：`URL`（可含 `{{参数}}`）、`Headers`（JSON）、`Body 模板`（JSON，留空则把参数原样当 body）、`参数 Schema`（既做入参校验，也原样作为 `tools[].function.parameters` 给模型看）。
+
+失败口径：**tool 节点失败 → 整个 run 失败**（错误里有节点 id）；**llm 节点里的 FC 工具失败 → 错误回给模型**，让它自己改参数重试，run 继续。重试只对连接错误/超时/5xx，**4xx 不重试**。
+
+---
+
 ## 验证
 
 ```powershell
-# 后端：32 个用例，覆盖版本语义、SSE 终态、取消、审批续跑、序号恢复、节点 Schema、Key 脱敏、MAX_STEPS 守卫、模型名不匹配时的可读报错、并发保存的乐观锁
+# 后端：43 个用例，覆盖版本语义、SSE 终态、取消、审批续跑、序号恢复、节点 Schema、Key 脱敏、MAX_STEPS 守卫、模型名不匹配时的可读报错、并发保存的乐观锁、工具 CRUD/重试/幂等/FC 回路
 cd agentflow-backend
 .venv\Scripts\python.exe -m pytest
 
@@ -174,6 +193,7 @@ npm run build
 5. 切「指标成本」→ Token 用量与节点表合计一致；点「刷新指标」拉 `GET /api/runs/:id/stats`。
 6. 打开「运行历史」→ 按流程筛选 → 点「回放」看到完整事件时序、节点耗时、终态不转圈。
 7. 想让审批卡出现：画一条 `input → human → output`，运行后状态变「等待审批」，点「批准并续跑」→ 变「成功」。
+8. 想让工具事件出现：`/tools` 新建内置 `echo` → 试跑一次 → 在流程里加 tool 节点选它（参数模板 `{"text":"{{query}}"}`），或在 llm 节点「绑定工具」里勾上它 → 运行时日志出现 `tool_call` / `tool_result`。
 
 ---
 
@@ -189,7 +209,7 @@ npm run build
 |---|---|---|
 | **R1 ✅** | Flow CRUD + 版本语义、SSE、取消/续跑、测试基座 | 发布/问题面板、流式输出、指标、历史筛选、回放 |
 | **R2 ✅** | 节点 Schema 注册表、`/api/settings/llm`、OpenAI 兼容流式、手写 Agent Loop + `MAX_STEPS` 守卫 | 节点库/配置面板改吃后端 Schema、模型设置弹层、未配置拦截与引导、节点数 vs 模型调用数拆分 |
-| R3 | 工具层（超时 / 重试 / 幂等） | 工具管理页 |
+| **R3 ✅** | 工具注册表（HTTP + 内置 echo/now/calc）、超时/重试/幂等、llm 节点真 Function Calling | 工具管理页（注册/试跑/调用记录）、tool 节点工具下拉、llm 节点「绑定工具」勾选 |
 | R4 | LangGraph 编译 + checkpointer | 中断续跑状态机 |
 | R5 | MCP + RAG + Skill | 知识库页 |
 | R6 | 评测体系 + Docker | 评测页 |

@@ -1,11 +1,98 @@
 import { useEffect, useMemo } from "react";
 import { Copy, Trash2 } from "lucide-react";
+import { Link } from "react-router-dom";
 import { z } from "zod";
 import { useFlowStore } from "@/store/flowStore";
 import { useNodeTypeStore } from "@/store/nodeTypeStore";
 import { useSettingsStore } from "@/store/settingsStore";
+import { useToolStore } from "@/store/toolStore";
 import { normalizeSchema, type NormalizedSchema, type SchemaProperty } from "@/utils/schema";
 import type { FlowNode } from "@/types/flow";
+
+/** tool 节点的工具选择：从注册表来，不给手填 id，避免写错一个字符到运行期才报错。 */
+function ToolRefField({ node }: { node: FlowNode }) {
+  const tools = useToolStore((s) => s.tools);
+  const loadTools = useToolStore((s) => s.load);
+  const updateConfig = useFlowStore((s) => s.updateConfig);
+
+  useEffect(() => {
+    void loadTools();
+  }, [loadTools]);
+
+  const value = String(node.config.tool_id ?? "");
+  const missing = value !== "" && !tools.some((tool) => tool.id === value);
+
+  return (
+    <label className="block mb-3">
+      <span className="block mb-1 text-[12px] text-ink-2">工具</span>
+      <select className="field" value={value} onChange={(e) => updateConfig(node.id, { tool_id: e.target.value })}>
+        <option value="">未选择（运行会失败）</option>
+        {tools.map((tool) => (
+          <option key={tool.id} value={tool.id}>
+            {tool.name}{tool.enabled ? "" : "（已停用）"}{tool.kind === "builtin" ? " · 内置" : " · HTTP"}
+          </option>
+        ))}
+        {missing && <option value={value}>{value}（注册表里不存在）</option>}
+      </select>
+      <div className="mt-1 text-[11px] text-ink-3">
+        {tools.length === 0 ? (
+          <>还没有工具，先到 <Link className="text-primary hover:underline" to="/tools">工具管理</Link> 注册一个。</>
+        ) : (
+          <>超时 / 重试 / 幂等跟随工具定义，可在 <Link className="text-primary hover:underline" to="/tools">工具管理</Link> 里改并试跑。</>
+        )}
+      </div>
+    </label>
+  );
+}
+
+/** llm 节点的工具绑定：勾选后模型会自己决定调不调，结果回填后继续生成。 */
+function ToolBindField({ node }: { node: FlowNode }) {
+  const tools = useToolStore((s) => s.tools);
+  const loadTools = useToolStore((s) => s.load);
+  const updateConfig = useFlowStore((s) => s.updateConfig);
+
+  useEffect(() => {
+    void loadTools();
+  }, [loadTools]);
+
+  const value = Array.isArray(node.config.tool_ids) ? (node.config.tool_ids as string[]) : [];
+  const toggle = (id: string) => {
+    const next = value.includes(id) ? value.filter((item) => item !== id) : [...value, id];
+    updateConfig(node.id, { tool_ids: next });
+  };
+
+  return (
+    <div className="mb-3">
+      <div className="mb-1 text-[12px] text-ink-2">
+        绑定工具
+        <span className="ml-1 text-ink-3">· 勾选后模型自行决定调用，每多一轮算一步</span>
+      </div>
+      {tools.length === 0 ? (
+        <div className="text-[11px] text-ink-3">
+          还没有工具。去 <Link className="text-primary hover:underline" to="/tools">工具管理</Link> 注册后再勾选。
+        </div>
+      ) : (
+        <div className="border border-line rounded-sm max-h-[132px] overflow-y-auto">
+          {tools.map((tool) => (
+            <label key={tool.id} className="flex items-center gap-2 px-2 py-1 text-[12px] hover:bg-slate-50 cursor-pointer">
+              <input
+                type="checkbox"
+                className="w-3.5 h-3.5 accent-primary"
+                checked={value.includes(tool.id)}
+                disabled={!tool.enabled}
+                onChange={() => toggle(tool.id)}
+              />
+              <span className="font-mono">{tool.name}</span>
+              {!tool.enabled && <span className="text-[10px] text-ink-3">停用</span>}
+              {tool.risk === "high" && <span className="badge badge-red !text-[10px] !py-0">high</span>}
+            </label>
+          ))}
+        </div>
+      )}
+      {value.length > 0 && <div className="mt-1 text-[11px] text-ink-3">已绑定 {value.length} 个 · 工具失败不会中断运行，错误会回给模型</div>}
+    </div>
+  );
+}
 
 /** 模型字段专用控件：优先给网关支持的模型下拉，避免手打一个网关不认的名字。 */
 function ModelField({ node }: { node: FlowNode }) {
@@ -224,13 +311,12 @@ export function ConfigPanel() {
       </div>
 
       <div className="flex-1 overflow-y-auto px-4 py-3">
-        {Object.entries(schema.properties).map(([name, prop]) =>
-          spec.type === "llm" && name === "model" ? (
-            <ModelField key={name} node={node} />
-          ) : (
-            <FieldControl key={name} node={node} prop={prop} name={name} />
-          ),
-        )}
+        {Object.entries(schema.properties).map(([name, prop]) => {
+          if (spec.type === "llm" && name === "model") return <ModelField key={name} node={node} />;
+          if (spec.type === "llm" && name === "tool_ids") return <ToolBindField key={name} node={node} />;
+          if (spec.type === "tool" && name === "tool_id") return <ToolRefField key={name} node={node} />;
+          return <FieldControl key={name} node={node} prop={prop} name={name} />;
+        })}
 
         {(localErrors.length > 0 || nodeServerErrors.length > 0) && (
           <div className="border border-danger/30 bg-danger-50 rounded-sm px-3 py-2 text-[12px] text-danger">

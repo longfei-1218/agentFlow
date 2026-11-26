@@ -68,6 +68,8 @@ class LLMDelta:
     cost: float = 0.0              # 增量成本（元）
     finish_reason: str | None = None
     usage: dict | None = None
+    # 一轮结束后组装好的工具调用：{id, name, arguments(JSON 字符串)}
+    tool_calls: list[dict] | None = None
 
 
 def price_for(model: str) -> tuple[float, float]:
@@ -103,8 +105,14 @@ async def stream_completion(
     model: str | None = None,
     temperature: float | None = None,
     max_tokens: int | None = None,
+    tools: list[dict] | None = None,
 ) -> AsyncIterator[LLMDelta]:
-    """逐帧吐模型输出；调用方负责把 delta 写进事件流。"""
+    """逐帧吐模型输出；调用方负责把 delta 写进事件流。
+
+    `tools` 就是 OpenAI 的 tools 数组（由 tool_runner.fc_schema 生成）。
+    Function Calling 的增量参数（delta.tool_calls[].function.arguments）是**分片**来的，
+    这里按 index 累积，整轮结束后一次性交给调用方，避免上层自己做拼装状态机。
+    """
     if not config.configured:
         raise LLMError("尚未配置 LLM API Key，请到系统设置里填写", code="LLM_NOT_CONFIGURED", status_code=409)
 
@@ -122,13 +130,20 @@ async def stream_completion(
         "Content-Type": "application/json",
         "Accept": "text/event-stream",
     }
+    if tools:
+        payload["tools"] = tools
+        payload["tool_choice"] = "auto"
 
     price = price_for(payload["model"])
     prompt_text = "".join(str(message.get("content", "")) for message in messages)
+    if tools:
+        # tools 定义本身也占输入 token：不把它算进去，prompt 估算会明显偏低
+        prompt_text += json.dumps(tools, ensure_ascii=False)
     prompt_tokens = estimate_tokens(prompt_text)
     completion_tokens = 0
     accumulated_text = ""
     exact_usage: dict | None = None
+    tool_acc: dict[int, dict] = {}
 
     if prompt_tokens:
         # 先把输入 token 记上，界面上的 token 数从第一帧起就有值
@@ -185,12 +200,46 @@ async def stream_completion(
                             delta_completion_tokens=chunk_tokens,
                             cost=_cost(0, chunk_tokens, price),
                         )
+
+                    for partial in delta.get("tool_calls") or []:
+                        index = int(partial.get("index") or 0)
+                        slot = tool_acc.setdefault(index, {"id": "", "name": "", "arguments": ""})
+                        if partial.get("id"):
+                            slot["id"] = partial["id"]
+                        function = partial.get("function") or {}
+                        if function.get("name"):
+                            slot["name"] += function["name"]
+                        fragment = function.get("arguments") or ""
+                        if fragment:
+                            # 参数分片的 token 也是真花钱的：一并计入 completion，别漏账
+                            slot["arguments"] += fragment
+                            chunk_tokens = estimate_tokens(fragment)
+                            completion_tokens += chunk_tokens
+                            yield LLMDelta(
+                                delta_tokens=chunk_tokens,
+                                delta_completion_tokens=chunk_tokens,
+                                cost=_cost(0, chunk_tokens, price),
+                            )
+
                     if finish:
                         yield LLMDelta(finish_reason=finish)
     except LLMError:
         raise
     except httpx.HTTPError as exc:
         raise LLMError(f"模型接口连接失败: {exc}", code="LLM_CONNECT_ERROR") from exc
+
+    if tool_acc:
+        yield LLMDelta(
+            tool_calls=[
+                {
+                    "id": slot["id"] or f"call_{index}",
+                    "name": slot["name"],
+                    "arguments": slot["arguments"] or "{}",
+                }
+                for index, slot in sorted(tool_acc.items())
+            ],
+            finish_reason="tool_calls",
+        )
 
     # 收尾校准：provider 给了 usage 就以它为准，差额补一帧（差可以是负的，界面表现为回退到真实值）
     if exact_usage:
