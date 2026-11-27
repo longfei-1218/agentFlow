@@ -28,8 +28,9 @@ class RunStatus(str, Enum):
 
 class Run(CamelModel):
     id: str
-    flow_id: str
-    flow_version: int
+    target_type: Literal["flow", "agent"] = "flow"
+    target_id: str
+    flow_version: int = 1
     status: RunStatus
     inputs: dict[str, Any] = Field(default_factory=dict)
     outputs: dict[str, Any] | None = None

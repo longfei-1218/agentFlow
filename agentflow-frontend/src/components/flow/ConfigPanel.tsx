@@ -1,584 +1,477 @@
 import { useEffect, useMemo, useState } from "react";
-import { Copy, Trash2 } from "lucide-react";
+import { Copy, MessageSquare, Pencil, Plus, RefreshCw, Trash2 } from "lucide-react";
 import { Link } from "react-router-dom";
-import { z } from "zod";
-import { flowsApi } from "@/api/flows";
-import { mcpApi } from "@/api/mcp";
+import { agentsApi } from "@/api/agents";
 import { useFlowStore } from "@/store/flowStore";
-import { useKnowledgeStore } from "@/store/knowledgeStore";
-import { useMcpStore } from "@/store/mcpStore";
 import { useNodeTypeStore } from "@/store/nodeTypeStore";
-import { useSettingsStore } from "@/store/settingsStore";
-import { useToolStore } from "@/store/toolStore";
-import { normalizeSchema, type NormalizedSchema, type SchemaProperty } from "@/utils/schema";
-import type { Flow, FlowNode } from "@/types/flow";
+import { startVariables, type FlowNode, type StartVariable } from "@/types/flow";
+import type { Agent } from "@/types/agent";
+import { VARIABLE_TYPES, emptyVariable } from "@/types/agent";
 
-/** tool 节点的工具选择：从注册表来，不给手填 id，避免写错一个字符到运行期才报错。 */
-function ToolRefField({ node }: { node: FlowNode }) {
-  const tools = useToolStore((s) => s.tools);
-  const loadTools = useToolStore((s) => s.load);
-  const updateConfig = useFlowStore((s) => s.updateConfig);
+function nodeLabel(node: FlowNode | undefined): string {
+  if (!node) return "—";
+  return `${node.type} · ${node.id}`;
+}
 
-  useEffect(() => {
-    void loadTools();
-  }, [loadTools]);
+function FieldLabel({ children }: { children: React.ReactNode }) {
+  return <span className="block mb-1 text-[12px] text-ink-2">{children}</span>;
+}
 
-  const value = String(node.config.tool_id ?? "");
-  const missing = value !== "" && !tools.some((tool) => tool.id === value);
+/** 分支节点的出边归属：true/false 或 body/done；画错线不用删，直接在下拉里改。 */
+function BranchEdgesField({ node, handles }: { node: FlowNode; handles: string[] }) {
+  const flow = useFlowStore((s) => s.flow);
+  const updateEdgeHandle = useFlowStore((s) => s.updateEdgeHandle);
+  const removeEdge = useFlowStore((s) => s.removeEdge);
+  const edges = flow.edges.filter((edge) => edge.source === node.id);
 
   return (
-    <label className="block mb-3">
-      <span className="block mb-1 text-[12px] text-ink-2">工具</span>
-      <select className="field" value={value} onChange={(e) => updateConfig(node.id, { tool_id: e.target.value })}>
-        <option value="">未选择（运行会失败）</option>
-        {tools.map((tool) => (
-          <option key={tool.id} value={tool.id}>
-            {tool.name}{tool.enabled ? "" : "（已停用）"}{tool.kind === "builtin" ? " · 内置" : " · HTTP"}
-          </option>
-        ))}
-        {missing && <option value={value}>{value}（注册表里不存在）</option>}
-      </select>
-      <div className="mt-1 text-[11px] text-ink-3">
-        {tools.length === 0 ? (
-          <>还没有工具，先到 <Link className="text-primary hover:underline" to="/tools">工具管理</Link> 注册一个。</>
-        ) : (
-          <>超时 / 重试 / 幂等跟随工具定义，可在 <Link className="text-primary hover:underline" to="/tools">工具管理</Link> 里改并试跑。</>
-        )}
+    <div className="mt-3 border-t border-line pt-3">
+      <div className="text-[11px] text-ink-3 mb-1.5">出边（连错可在这里改分支归属）</div>
+      {edges.length === 0 && <div className="text-[11px] text-ink-3">还没有出边，从节点右侧锚点拖线。</div>}
+      <div className="space-y-1.5">
+        {edges.map((edge) => {
+          const target = flow.nodes.find((item) => item.id === edge.target);
+          return (
+            <div key={edge.id} className="flex items-center gap-2 text-[11px]">
+              <select
+                className="field !py-1"
+                value={edge.sourceHandle ?? ""}
+                onChange={(event) => updateEdgeHandle(edge.id, event.target.value)}
+              >
+                {handles.map((handle) => (
+                  <option key={handle} value={handle}>{handle}</option>
+                ))}
+              </select>
+              <span className="text-ink-3 shrink-0">→</span>
+              <span className="truncate flex-1">{nodeLabel(target)}</span>
+              <button className="text-ink-3 hover:text-danger" title="删掉这条线" onClick={() => removeEdge(edge.id)}>
+                <Trash2 size={12} />
+              </button>
+            </div>
+          );
+        })}
       </div>
-    </label>
+    </div>
   );
 }
 
-/** llm 节点的工具绑定：勾选后模型会自己决定调不调，结果回填后继续生成。 */
-function ToolBindField({ node }: { node: FlowNode }) {
-  const tools = useToolStore((s) => s.tools);
-  const loadTools = useToolStore((s) => s.load);
+function StartConfig({ node }: { node: FlowNode }) {
   const updateConfig = useFlowStore((s) => s.updateConfig);
+  const variables = startVariables(node.config);
 
-  useEffect(() => {
-    void loadTools();
-  }, [loadTools]);
+  const write = (next: StartVariable[]) => updateConfig(node.id, { variables: next });
 
-  const value = Array.isArray(node.config.tool_ids) ? (node.config.tool_ids as string[]) : [];
-  const toggle = (id: string) => {
-    const next = value.includes(id) ? value.filter((item) => item !== id) : [...value, id];
-    updateConfig(node.id, { tool_ids: next });
+  const patch = (index: number, values: Partial<StartVariable>) => {
+    write(variables.map((item, i) => (i === index ? { ...item, ...values } : item)));
   };
 
   return (
-    <div className="mb-3">
-      <div className="mb-1 text-[12px] text-ink-2">
-        绑定工具
-        <span className="ml-1 text-ink-3">· 勾选后模型自行决定调用，每多一轮算一步</span>
+    <div>
+      <div className="text-[11px] text-ink-3 leading-relaxed mb-3">
+        流程入口。运行时从「运行」弹窗取值，下游节点用 {"{{start.<key>}}"} 引用。
       </div>
-      {tools.length === 0 ? (
-        <div className="text-[11px] text-ink-3">
-          还没有工具。去 <Link className="text-primary hover:underline" to="/tools">工具管理</Link> 注册后再勾选。
+      {variables.map((variable, index) => (
+        <div key={index} className="border border-line rounded-sm p-2 mb-2 bg-slate-50/60">
+          <div className="flex items-center gap-2">
+            <input
+              className="field !py-1 font-mono"
+              value={variable.key}
+              placeholder="变量名，如 query"
+              onChange={(event) => patch(index, { key: event.target.value })}
+            />
+            <select
+              className="field !py-1 w-[88px]"
+              value={variable.type}
+              onChange={(event) => patch(index, { type: event.target.value as StartVariable["type"] })}
+            >
+              {VARIABLE_TYPES.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
+            </select>
+            <button className="text-ink-3 hover:text-danger" onClick={() => write(variables.filter((_, i) => i !== index))}>
+              <Trash2 size={13} />
+            </button>
+          </div>
+          <div className="grid grid-cols-2 gap-2 mt-2">
+            <input
+              className="field !py-1"
+              value={variable.label}
+              placeholder="展示名（可选）"
+              onChange={(event) => patch(index, { label: event.target.value })}
+            />
+            <input
+              className="field !py-1"
+              value={variable.default === null || variable.default === undefined ? "" : String(variable.default)}
+              placeholder="默认值（可选）"
+              onChange={(event) => patch(index, { default: event.target.value === "" ? null : event.target.value })}
+            />
+          </div>
+          <label className="flex items-center gap-1.5 mt-2 text-[11px] text-ink-2">
+            <input
+              type="checkbox"
+              className="w-3.5 h-3.5 accent-primary"
+              checked={variable.required}
+              onChange={(event) => patch(index, { required: event.target.checked })}
+            />
+            必填
+            <input
+              className="field !py-1 ml-auto"
+              value={variable.description}
+              placeholder="说明（可选）"
+              onChange={(event) => patch(index, { description: event.target.value })}
+            />
+          </label>
         </div>
-      ) : (
-        <div className="border border-line rounded-sm max-h-[132px] overflow-y-auto">
-          {tools.map((tool) => (
-            <label key={tool.id} className="flex items-center gap-2 px-2 py-1 text-[12px] hover:bg-slate-50 cursor-pointer">
-              <input
-                type="checkbox"
-                className="w-3.5 h-3.5 accent-primary"
-                checked={value.includes(tool.id)}
-                disabled={!tool.enabled}
-                onChange={() => toggle(tool.id)}
-              />
-              <span className="font-mono">{tool.name}</span>
-              {!tool.enabled && <span className="text-[10px] text-ink-3">停用</span>}
-              {tool.risk === "high" && <span className="badge badge-red !text-[10px] !py-0">high</span>}
-            </label>
-          ))}
-        </div>
-      )}
-      {value.length > 0 && <div className="mt-1 text-[11px] text-ink-3">已绑定 {value.length} 个 · 工具失败不会中断运行，错误会回给模型</div>}
+      ))}
+      <button
+        className="btn w-full !py-1.5"
+        onClick={() => write([...variables, { ...emptyVariable(`var_${variables.length + 1}`), required: false }])}
+      >
+        <Plus size={12} className="inline mr-1 -mt-0.5" />添加变量
+      </button>
     </div>
   );
 }
 
-/** mcp 节点：Server 与工具都从注册表来，工具名先探测再选，避免手写错一个字符到运行期才报错。 */
-function MCPRefField({ node }: { node: FlowNode }) {
-  const servers = useMcpStore((s) => s.servers);
-  const tools = useMcpStore((s) => s.tools);
-  const loadServers = useMcpStore((s) => s.load);
+function AgentConfigField({ node }: { node: FlowNode }) {
+  const flow = useFlowStore((s) => s.flow);
   const updateConfig = useFlowStore((s) => s.updateConfig);
-
-  const serverId = String(node.config.server_id ?? "");
-  const toolName = String(node.config.tool_name ?? "");
-  const knownTools = tools[serverId] ?? [];
-  const [probeError, setProbeError] = useState<string | null>(null);
-  const [probing, setProbing] = useState(false);
+  const [agents, setAgents] = useState<Agent[]>([]);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    void loadServers();
-  }, [loadServers]);
-
-  useEffect(() => {
-    setProbeError(null);
-    if (!serverId) return;
-    let cancelled = false;
-    setProbing(true);
-    mcpApi
-      .probe(serverId)
-      .then((result) => {
-        if (cancelled) return;
-        if (!result.ok) setProbeError(result.error || "探测失败");
-        else useMcpStore.setState((state) => ({ tools: { ...state.tools, [serverId]: result.tools } }));
-      })
-      .catch((error) => {
-        if (!cancelled) setProbeError(error instanceof Error ? error.message : "探测失败");
-      })
-      .finally(() => {
-        if (!cancelled) setProbing(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [serverId]);
-
-  const missing = toolName !== "" && knownTools.length > 0 && !knownTools.some((tool) => tool.name === toolName);
-
-  return (
-    <>
-      <label className="block mb-3">
-        <span className="block mb-1 text-[12px] text-ink-2">MCP Server</span>
-        <select className="field" value={serverId} onChange={(event) => updateConfig(node.id, { server_id: event.target.value, tool_name: "" })}>
-          <option value="">未选择（运行会失败）</option>
-          {servers.map((server) => (
-            <option key={server.id} value={server.id}>
-              {server.name}{server.enabled ? "" : "（已停用）"}
-            </option>
-          ))}
-        </select>
-        <div className="mt-1 text-[11px] text-ink-3">
-          {servers.length === 0 ? (
-            <>还没有 Server，先到 <Link className="text-primary hover:underline" to="/mcp">MCP 服务</Link> 注册并探测工具。</>
-          ) : probing ? (
-            "正在探测工具清单…"
-          ) : (
-            <>调用时每次都会重新 initialize 握手；工具清单来自 <Link className="text-primary hover:underline" to="/mcp">MCP 服务</Link> 的探测结果。</>
-          )}
-        </div>
-      </label>
-
-      <label className="block mb-3">
-        <span className="block mb-1 text-[12px] text-ink-2">工具名称</span>
-        {knownTools.length > 0 ? (
-          <select className="field" value={toolName} onChange={(event) => updateConfig(node.id, { tool_name: event.target.value })}>
-            <option value="">未选择（运行会失败）</option>
-            {knownTools.map((tool) => <option key={tool.name} value={tool.name}>{tool.name}</option>)}
-            {missing && <option value={toolName}>{toolName}（当前 Server 上没有）</option>}
-          </select>
-        ) : (
-          <input className="field font-mono" value={toolName} onChange={(event) => updateConfig(node.id, { tool_name: event.target.value })} placeholder="如 echo" />
-        )}
-        {probeError && <div className="mt-1 text-[11px] text-warn">探测失败：{probeError}（可以直接手填工具名）</div>}
-      </label>
-    </>
-  );
-}
-
-/** knowledge 节点：知识库从知识库页来，chunk 参数与检索口径都跟着库走。 */
-function KnowledgeRefField({ node }: { node: FlowNode }) {
-  const kbs = useKnowledgeStore((s) => s.kbs);
-  const loadKbs = useKnowledgeStore((s) => s.load);
-  const updateConfig = useFlowStore((s) => s.updateConfig);
-
-  useEffect(() => {
-    void loadKbs();
-  }, [loadKbs]);
-
-  const value = String(node.config.kb_id ?? "");
-  const missing = value !== "" && !kbs.some((kb) => kb.id === value);
-
-  return (
-    <label className="block mb-3">
-      <span className="block mb-1 text-[12px] text-ink-2">知识库</span>
-      <select className="field" value={value} onChange={(event) => updateConfig(node.id, { kb_id: event.target.value })}>
-        <option value="">未选择（运行会失败）</option>
-        {kbs.map((kb) => (
-          <option key={kb.id} value={kb.id}>{kb.name} · {kb.chunkCount} 块</option>
-        ))}
-        {missing && <option value={value}>{value}（知识库里不存在）</option>}
-      </select>
-      <div className="mt-1 text-[11px] text-ink-3">
-        {kbs.length === 0
-          ? <>还没有知识库，先去 <Link className="text-primary hover:underline" to="/knowledge">知识库</Link> 新建并添加文档。</>
-          : <>命中片段会拼成 <span className="font-mono">context</span> 变量，下游 prompt/llm 用 <span className="font-mono">{"{{context}}"}</span> 引用。</>}
-      </div>
-    </label>
-  );
-}
-
-/** skill 节点：子流程从流程列表里选，避免用户手抄 flow_id。 */
-function SkillRefField({ node }: { node: FlowNode }) {
-  const currentFlowId = useFlowStore((s) => s.flow.id);
-  const updateConfig = useFlowStore((s) => s.updateConfig);
-  const [flows, setFlows] = useState<Flow[]>([]);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    flowsApi
-      .list()
-      .then((items) => {
-        if (!cancelled) setFlows(items);
-      })
-      .catch((err) => {
-        if (!cancelled) setError(err instanceof Error ? err.message : "流程列表加载失败");
-      });
-    return () => {
-      cancelled = true;
-    };
+    agentsApi.list()
+      .then(setAgents)
+      .catch(() => setAgents([]))
+      .finally(() => setLoading(false));
   }, []);
 
-  const value = String(node.config.flow_id ?? "");
-  const missing = value !== "" && !flows.some((flow) => flow.id === value);
+  const agentId = String(node.config.agentId ?? "");
+  const agent = agents.find((item) => item.id === agentId);
+  const inputMap = (node.config.inputMap && typeof node.config.inputMap === "object")
+    ? node.config.inputMap as Record<string, string>
+    : {};
+  const missing = agentId !== "" && !agent;
+
+  const setMapping = (key: string, value: string) => {
+    const next = { ...inputMap };
+    if (value === "") delete next[key];
+    else next[key] = value;
+    updateConfig(node.id, { inputMap: next });
+  };
+
+  const autoMap = () => {
+    const vars = agent?.variables ?? [];
+    const starts = startVariables(flow.nodes.find((item) => item.type === "start")?.config ?? {});
+    const next: Record<string, string> = { ...inputMap };
+    vars.forEach((variable) => {
+      if (next[variable.key]) return;
+      const exact = starts.find((item) => item.key === variable.key);
+      if (exact) next[variable.key] = `{{start.${exact.key}}}`;
+    });
+    updateConfig(node.id, { inputMap: next });
+  };
 
   return (
-    <label className="block mb-3">
-      <span className="block mb-1 text-[12px] text-ink-2">子流程</span>
-      <select className="field" value={value} onChange={(event) => updateConfig(node.id, { flow_id: event.target.value })}>
-        <option value="">未选择（运行会失败）</option>
-        {flows
-          .filter((flow) => flow.id !== currentFlowId)
-          .map((flow) => (
-            <option key={flow.id} value={flow.id}>{flow.name} · v{flow.version}</option>
-          ))}
-        {missing && <option value={value}>{value}（流程不存在）</option>}
+    <div>
+      <FieldLabel>Agent</FieldLabel>
+      <select
+        className="field"
+        value={agentId}
+        onChange={(event) => updateConfig(node.id, { agentId: event.target.value })}
+      >
+        <option value="">{loading ? "加载 Agent 库…" : "未选择（运行会失败）"}</option>
+        {agents.map((item) => (
+          <option key={item.id} value={item.id}>{item.name}（{item.id}）</option>
+        ))}
+        {missing && <option value={agentId}>{agentId}（Agent 库里不存在）</option>}
       </select>
       <div className="mt-1 text-[11px] text-ink-3">
-        子流程内联执行、不落运行记录；嵌套上限 3 层，含 human 审批的子流程会被拒绝。{error && <span className="text-warn"> {error}</span>}
-      </div>
-    </label>
-  );
-}
-
-/** 分支/循环节点的出边归属。拉线时选的是锚点，这里可以复核和改归属。 */
-const BRANCH_OPTIONS: Record<string, { value: string; label: string }[]> = {
-  condition: [
-    { value: "true", label: "真分支（表达式成立）" },
-    { value: "false", label: "假分支（表达式不成立）" },
-  ],
-  loop: [
-    { value: "body", label: "循环体（回到这里，再跑一轮）" },
-    { value: "done", label: "退出（离开循环）" },
-  ],
-};
-
-function BranchEdgesField({ node }: { node: FlowNode }) {
-  const edges = useFlowStore((s) => s.flow.edges);
-  const nodes = useFlowStore((s) => s.flow.nodes);
-  const updateEdgeHandle = useFlowStore((s) => s.updateEdgeHandle);
-
-  const options = BRANCH_OPTIONS[node.type];
-  if (!options) return null;
-
-  const outgoing = edges.filter((edge) => edge.source === node.id);
-  const used = new Set(outgoing.map((edge) => edge.sourceHandle));
-  const missing = options.filter((option) => !used.has(option.value));
-
-  return (
-    <div className="mb-3">
-      <div className="mb-1 text-[12px] text-ink-2">
-        分支连线
-        <span className="ml-1 text-ink-3">· 出边归属决定走哪条，改下拉即可，不用删线重拉</span>
+        {agents.length === 0 && !loading ? (
+          <>还没有 Agent，先到 <Link className="text-primary hover:underline" to="/agents">Agent 库</Link> 新建。</>
+        ) : (
+          <>Agent 是全局可复用资源，流程只保存引用，不复制定义。</>
+        )}
       </div>
 
-      {outgoing.length === 0 ? (
-        <div className="text-[11px] text-ink-3">
-          还没有出边。从节点右侧对应颜色的锚点拉线到目标节点。
+      {agentId && (
+        <div className="flex gap-2 mt-2">
+          <Link className="btn !py-1" to={`/agents/${agentId}`}>
+            <Pencil size={12} className="inline mr-1 -mt-0.5" />编辑 Agent
+          </Link>
+          <Link
+            className="btn !py-1"
+            to={`/agents/${agentId}/chat?flowId=${flow.id}&nodeId=${node.id}`}
+          >
+            <MessageSquare size={12} className="inline mr-1 -mt-0.5" />对话
+          </Link>
         </div>
-      ) : (
-        <div className="space-y-1.5">
-          {outgoing.map((edge) => {
-            const target = nodes.find((item) => item.id === edge.target);
-            const known = options.some((option) => option.value === edge.sourceHandle);
-            return (
-              <div key={edge.id} className="flex items-center gap-2">
-                <select
-                  className="field !py-1 !text-[12px] flex-1"
-                  value={edge.sourceHandle ?? ""}
-                  onChange={(event) => updateEdgeHandle(edge.id, event.target.value)}
-                >
-                  {!known && <option value={edge.sourceHandle ?? ""}>未标注（选一个）</option>}
-                  {options.map((option) => (
-                    <option key={option.value} value={option.value}>{option.label}</option>
-                  ))}
-                </select>
-                <span className="text-[11px] text-ink-3 font-mono shrink-0" title={target?.id}>
-                  → {target?.type ?? "?"} {edge.target}
-                </span>
+      )}
+
+      {agent ? (
+        <div className="mt-4 border-t border-line pt-3">
+          <div className="flex items-center gap-2 mb-1.5">
+            <span className="text-[12px] font-semibold">变量映射</span>
+            <button className="ml-auto text-[11px] text-primary hover:underline flex items-center gap-1" onClick={autoMap}>
+              <RefreshCw size={10} />同名自动映射
+            </button>
+          </div>
+          <div className="text-[11px] text-ink-3 mb-2">
+            左列是 Agent 的变量，右列写流程表达式；产物可用 {"{{<nodeId>.output.<field>}}"} 取。
+          </div>
+          {agent.variables.length === 0 && (
+            <div className="text-[11px] text-warn">该 Agent 没有声明变量，调用时不会注入任何输入。</div>
+          )}
+          <div className="space-y-1.5">
+            {agent.variables.map((variable) => (
+              <div key={variable.key} className="grid grid-cols-[112px_1fr] gap-2 items-center">
+                <div className="min-w-0">
+                  <div className="font-mono text-[11px] truncate">{variable.key}</div>
+                  <div className="text-[10px] text-ink-3 truncate">
+                    {variable.type}{variable.required ? " · 必填" : ""}
+                  </div>
+                </div>
+                <input
+                  className="field !py-1 font-mono"
+                  value={inputMap[variable.key] ?? ""}
+                  placeholder={variable.key === "query" ? "{{start.query}}" : `{{start.${variable.key}}}`}
+                  onChange={(event) => setMapping(variable.key, event.target.value)}
+                />
               </div>
-            );
-          })}
+            ))}
+          </div>
+          <div className="mt-2 text-[10px] text-ink-3 leading-relaxed">
+            变量模板示例：{"{{start.query}}"}、{"{{chat_1.output.text}}"}、{"{{nodes.chat_1.output.text}}"}。
+            留空的必填变量会按后端默认值补，仍缺失时运行返回 AGENT_INPUT_MISSING。
+          </div>
         </div>
-      )}
-
-      {missing.length > 0 && (
-        <div className="mt-1 text-[11px] text-warn">
-          缺少：{missing.map((option) => option.label).join("、")}
-          {node.type === "loop" ? "（body 必填，done 缺失时直接结束）" : "（运行校验会拦下）"}
-        </div>
-      )}
+      ) : missing ? (
+        <div className="mt-3 text-[11px] text-danger">引用的 Agent 不存在，重新选一个再运行。</div>
+      ) : null}
     </div>
   );
 }
 
-
-function ModelField({ node }: { node: FlowNode }) {
-  const models = useSettingsStore((s) => s.models);
-  const view = useSettingsStore((s) => s.view);
+function ConditionConfig({ node }: { node: FlowNode }) {
   const updateConfig = useFlowStore((s) => s.updateConfig);
-  const value = String(node.config.model ?? "");
-  const supported = models.length === 0 || value === "" || models.includes(value);
-
   return (
-    <label className="block mb-3">
-      <span className="block mb-1 text-[12px] text-ink-2">
-        模型
-        <span className="ml-1 text-ink-3">· 留空则跟随「模型设置」里的默认（{view?.model ?? "未配置"}）</span>
-      </span>
-
-      {models.length > 0 ? (
-        <select className="field" value={value} onChange={(e) => updateConfig(node.id, { model: e.target.value })}>
-          <option value="">跟随系统默认（{view?.model ?? "未配置"}）</option>
-          {!supported && <option value={value}>{value}（网关不支持）</option>}
-          {models.map((item) => <option key={item} value={item}>{item}</option>)}
-        </select>
-      ) : (
-        <input
-          className="field"
-          value={value}
-          placeholder={view?.model ? `留空 = 跟随系统默认（${view.model}）` : "留空 = 跟随系统默认"}
-          onChange={(e) => updateConfig(node.id, { model: e.target.value })}
-        />
-      )}
-
-      {!supported && (
-        <button
-          className="mt-1 text-[11px] text-danger hover:underline text-left"
-          onClick={() => updateConfig(node.id, { model: "" })}
-        >
-          当前值 {value} 不在网关支持列表，点此改为跟随系统默认
-        </button>
-      )}
-      <div className="mt-1 text-[11px] text-ink-3">节点级模型优先于系统默认。</div>
-    </label>
+    <div>
+      <FieldLabel>条件表达式</FieldLabel>
+      <textarea
+        className="field font-mono min-h-[76px]"
+        value={String(node.config.expression ?? "")}
+        placeholder="{{chat_1.output.text}} != ''"
+        onChange={(event) => updateConfig(node.id, { expression: event.target.value })}
+      />
+      <div className="mt-1 text-[11px] text-ink-3 leading-relaxed">
+        结果转成布尔，true 走真分支，false 走假分支；两个出边都要连，运行时只走其中一条。
+      </div>
+      <BranchEdgesField node={node} handles={["true", "false"]} />
+    </div>
   );
 }
 
-function buildZodSchema(schema: NormalizedSchema) {
-  const shape: Record<string, z.ZodTypeAny> = {};
-  const required = new Set(schema.required);
-
-  for (const [key, prop] of Object.entries(schema.properties)) {
-    const label = prop.title ?? key;
-    let field: z.ZodTypeAny;
-
-    if (prop.type === "number" || prop.type === "integer") {
-      let number = z.number({ invalid_type_error: `${label} 必须是数字` });
-      if (prop.type === "integer") number = number.int(`${label} 必须是整数`);
-      if (prop.minimum !== undefined) number = number.min(prop.minimum, `${label} 不能小于 ${prop.minimum}`);
-      if (prop.maximum !== undefined) number = number.max(prop.maximum, `${label} 不能大于 ${prop.maximum}`);
-      field = number;
-    } else if (prop.type === "boolean") {
-      field = z.boolean();
-    } else if (prop.type === "array") {
-      field = z.array(z.union([z.string(), z.number()]));
-    } else {
-      let string: z.ZodTypeAny = z.string({ invalid_type_error: `${label} 必须是文本` });
-      if (prop.minLength) string = (string as z.ZodString).min(prop.minLength, `${label} 不能为空`);
-      if (prop.enum?.length) string = string.refine((v) => prop.enum!.includes(v as string), `${label} 取值非法`);
-      field = string;
-    }
-
-    shape[key] = required.has(key) ? field : field.optional();
-  }
-  return z.object(shape).passthrough();
+function LoopConfig({ node }: { node: FlowNode }) {
+  const updateConfig = useFlowStore((s) => s.updateConfig);
+  return (
+    <div>
+      <FieldLabel>最大轮次</FieldLabel>
+      <input
+        type="number"
+        min={1}
+        max={32}
+        className="field"
+        value={Number(node.config.maxRounds ?? 3)}
+        onChange={(event) => updateConfig(node.id, { maxRounds: Number(event.target.value) })}
+      />
+      <div className="mt-3">
+        <FieldLabel>退出条件（可选）</FieldLabel>
+        <input
+          className="field font-mono"
+          value={String(node.config.exitCondition ?? "")}
+          placeholder="{{chat_1.output.done}} == true"
+          onChange={(event) => updateConfig(node.id, { exitCondition: event.target.value })}
+        />
+      </div>
+      <div className="mt-1 text-[11px] text-ink-3 leading-relaxed">
+        每轮先判断退出条件；为空或为假时走 body，达到上限走 done。
+      </div>
+      <BranchEdgesField node={node} handles={["body", "done"]} />
+    </div>
+  );
 }
 
-function FieldControl({
-  node,
-  prop,
-  name,
-}: {
-  node: FlowNode;
-  prop: SchemaProperty;
-  name: string;
-}) {
+function HumanConfig({ node }: { node: FlowNode }) {
   const updateConfig = useFlowStore((s) => s.updateConfig);
-  const value = node.config[name];
-  const label = prop.title ?? name;
-  const set = (next: unknown) => updateConfig(node.id, { [name]: next });
-
-  const isLongText =
-    [
-      "template", "system", "expression", "message", "exit_condition",
-      "args_template", "query_template", "inputs_template",
-    ].includes(name) ||
-    (prop.description?.length ?? 0) > 40 ||
-    String(value ?? "").length > 60;
-
   return (
-    <label className="block mb-3">
-      <span className="block mb-1 text-[12px] text-ink-2">
-        {label}
-        {prop.description && <span className="ml-1 text-ink-3">· {prop.description}</span>}
-      </span>
-
-      {prop.enum ? (
-        <select className="field" value={String(value ?? prop.default ?? "")} onChange={(e) => set(e.target.value)}>
-          {prop.enum.map((option) => <option key={option} value={option}>{option}</option>)}
-        </select>
-      ) : prop.type === "boolean" ? (
-        <input
-          type="checkbox"
-          className="w-4 h-4 accent-primary"
-          checked={Boolean(value ?? prop.default ?? false)}
-          onChange={(e) => set(e.target.checked)}
-        />
-      ) : prop.type === "array" ? (
-        <input
-          className="field"
-          placeholder="逗号分隔，如 text, score"
-          value={Array.isArray(value) ? value.join(", ") : String(value ?? "")}
-          onChange={(e) => set(e.target.value.split(",").map((v) => v.trim()).filter(Boolean))}
-        />
-      ) : prop.type === "number" || prop.type === "integer" ? (
+    <div>
+      <FieldLabel>审批提示</FieldLabel>
+      <textarea
+        className="field min-h-[64px]"
+        value={String(node.config.message ?? "")}
+        onChange={(event) => updateConfig(node.id, { message: event.target.value })}
+      />
+      <div className="mt-3">
+        <FieldLabel>超时（秒）</FieldLabel>
         <input
           type="number"
+          min={1}
           className="field"
-          min={prop.minimum}
-          max={prop.maximum}
-          step={prop.type === "integer" ? 1 : 0.1}
-          value={Number(value ?? prop.default ?? 0)}
-          onChange={(e) => set(Number(e.target.value))}
+          value={Number(node.config.timeout ?? 300)}
+          onChange={(event) => updateConfig(node.id, { timeout: Number(event.target.value) })}
         />
-      ) : isLongText ? (
-        <textarea
-          className="field min-h-[92px] resize-y"
-          value={String(value ?? prop.default ?? "")}
-          onChange={(e) => set(e.target.value)}
-        />
+      </div>
+      <div className="mt-1 text-[11px] text-ink-3">运行时进入 waiting_human，运行面板或回放页批准后继续。</div>
+    </div>
+  );
+}
+
+function EndConfigField({ node }: { node: FlowNode }) {
+  const updateConfig = useFlowStore((s) => s.updateConfig);
+  const raw = node.config.outputs;
+  const objectMode = !!raw && !Array.isArray(raw) && typeof raw === "object";
+  const outputs = objectMode ? raw as Record<string, string> : [];
+
+  const setObjectMode = (next: boolean) => {
+    if (next) {
+      updateConfig(node.id, { outputs: outputs && Object.keys(outputs).length > 0 ? outputs : { text: "{{chat_1.output.text}}" } });
+    } else {
+      updateConfig(node.id, { outputs: [] });
+    }
+  };
+
+  const setEntry = (oldKey: string, key: string, value: string) => {
+    const next: Record<string, string> = {};
+    Object.entries(outputs).forEach(([itemKey, itemValue]) => {
+      next[itemKey === oldKey ? key : itemKey] = itemKey === oldKey ? value : itemValue;
+    });
+    updateConfig(node.id, { outputs: next });
+  };
+
+  return (
+    <div>
+      <div className="flex gap-1 mb-2">
+        <button
+          className={`px-2 py-1 rounded-sm text-[11px] ${!objectMode ? "bg-primary text-white" : "bg-white border border-line"}`}
+          onClick={() => setObjectMode(false)}
+        >
+          列表
+        </button>
+        <button
+          className={`px-2 py-1 rounded-sm text-[11px] ${objectMode ? "bg-primary text-white" : "bg-white border border-line"}`}
+          onClick={() => setObjectMode(true)}
+        >
+          对象
+        </button>
+      </div>
+      {objectMode ? (
+        <div className="space-y-1.5">
+          {Object.entries(outputs).map(([key, value]) => (
+            <div key={key} className="flex items-center gap-1.5">
+              <input
+                className="field !py-1 w-[96px] font-mono"
+                value={key}
+                onChange={(event) => setEntry(key, event.target.value, value)}
+              />
+              <input
+                className="field !py-1 font-mono"
+                value={value}
+                placeholder="{{chat_1.output.text}}"
+                onChange={(event) => setEntry(key, key, event.target.value)}
+              />
+              <button
+                className="text-ink-3 hover:text-danger"
+                onClick={() => updateConfig(node.id, { outputs: Object.fromEntries(Object.entries(outputs).filter(([item]) => item !== key)) })}
+              >
+                <Trash2 size={12} />
+              </button>
+            </div>
+          ))}
+          <button
+            className="btn w-full !py-1"
+            onClick={() => updateConfig(node.id, { outputs: { ...outputs, [`key_${Object.keys(outputs).length + 1}`]: "" } })}
+          >
+            <Plus size={11} className="inline mr-1 -mt-0.5" />添加输出
+          </button>
+        </div>
       ) : (
-        <input
-          className="field"
-          value={String(value ?? prop.default ?? "")}
-          onChange={(e) => set(e.target.value)}
-        />
+        <>
+          <FieldLabel>输出路径（每行一个）</FieldLabel>
+          <textarea
+            className="field font-mono min-h-[80px]"
+            value={Array.isArray(raw) ? (raw as string[]).join("\n") : ""}
+            placeholder={"chat_1.output.text\nkb_1.output.text"}
+            onChange={(event) => updateConfig(node.id, {
+              outputs: event.target.value.split("\n").map((item) => item.trim()).filter(Boolean),
+            })}
+          />
+          <div className="mt-1 text-[10px] text-ink-3">
+            列表模式下 key 取路径末段；留空自动取最后一个 Agent 的 text。对象模式可自定义 key。
+          </div>
+        </>
       )}
-    </label>
+    </div>
   );
 }
 
 export function ConfigPanel() {
+  const flow = useFlowStore((s) => s.flow);
   const selectedNodeId = useFlowStore((s) => s.selectedNodeId);
-  const node = useFlowStore((s) => s.flow.nodes.find((n) => n.id === s.selectedNodeId));
-  const serverErrors = useFlowStore((s) => s.validationErrors);
+  const setSelected = useFlowStore((s) => s.setSelected);
   const removeNode = useFlowStore((s) => s.removeNode);
   const duplicateNode = useFlowStore((s) => s.duplicateNode);
-
   const byType = useNodeTypeStore((s) => s.byType);
-  const loaded = useNodeTypeStore((s) => s.loaded);
-  const loadError = useNodeTypeStore((s) => s.error);
-  const load = useNodeTypeStore((s) => s.load);
-  const loadModels = useSettingsStore((s) => s.loadModels);
 
-  const spec = node ? byType[node.type] : undefined;
-  const schema = useMemo(() => normalizeSchema(spec?.configSchema), [spec]);
-
-  // 选中模型节点时顺手拉一次网关模型列表（失败静默，退回手填）
-  useEffect(() => {
-    if (node?.type === "llm") void loadModels();
-  }, [node?.type, loadModels]);
-
-  const localErrors = useMemo(() => {
-    if (!node || !spec) return [];
-    const result = buildZodSchema(schema).safeParse(node.config);
-    if (result.success) return [];
-    return result.error.issues.map((issue) => issue.message);
-  }, [node, spec, schema]);
-
-  const nodeServerErrors = serverErrors.filter((issue) => issue.nodeId === selectedNodeId);
+  const node = useMemo(
+    () => flow.nodes.find((item) => item.id === selectedNodeId),
+    [flow.nodes, selectedNodeId],
+  );
 
   if (!node) {
     return (
-      <aside className="w-[272px] flex-shrink-0 bg-white border-l border-line p-4">
-        <div className="text-[13px] font-semibold text-ink mb-2">配置面板</div>
-        <div className="border border-dashed border-line rounded-sm p-4 text-[12px] text-ink-3 leading-relaxed">
-          选中画布中的节点后，这里会按后端下发的 configSchema 自动生成表单。
+      <aside className="w-[360px] flex-shrink-0 bg-white border-l border-line overflow-y-auto p-4">
+        <div className="text-[13px] font-semibold">节点配置</div>
+        <div className="text-[12px] text-ink-3 mt-2 leading-relaxed">
+          点选画布上的节点查看配置。流程层只有开始、Agent、分支、循环、审批、结束六类；
+          提示词、模型、工具、知识库都在 Agent 库里维护。
+        </div>
+        <div className="mt-4 border border-dashed border-line rounded-sm p-3 text-[11px] text-ink-3 leading-relaxed">
+          <div className="text-ink font-medium mb-1">变量写法</div>
+          <div className="font-mono">{"{{start.query}}"}</div>
+          <div className="font-mono">{"{{chat_1.output.text}}"}</div>
+          <div className="font-mono">{"{{nodes.chat_1.output.text}}"}</div>
         </div>
       </aside>
     );
   }
 
-  if (!spec) {
-    return (
-      <aside className="w-[272px] flex-shrink-0 bg-white border-l border-line p-4">
-        <div className="text-[13px] font-semibold text-ink mb-2">配置面板</div>
-        <div className="border border-danger/30 bg-danger-50 rounded-sm p-3 text-[12px] text-danger">
-          {loaded
-            ? `节点类型 ${node.type} 不在后端注册表里，可能是旧流程或手改了 DSL。`
-            : loadError || "节点定义加载中…"}
-        </div>
-        <button className="btn mt-3 w-full" onClick={() => void load(true)}>重新加载节点定义</button>
-      </aside>
-    );
-  }
-
+  const spec = byType[node.type];
   return (
-    <aside className="w-[272px] flex-shrink-0 bg-white border-l border-line flex flex-col min-h-0">
-      <div className="px-4 py-3 border-b border-line">
+    <aside className="w-[360px] flex-shrink-0 bg-white border-l border-line overflow-y-auto">
+      <div className="px-4 py-3 border-b border-line sticky top-0 bg-white z-10">
         <div className="flex items-center gap-2">
-          <span className="w-6 h-6 rounded flex items-center justify-center text-white text-[12px]" style={{ background: spec.color }}>
-            {spec.icon}
-          </span>
-          <span className="text-[13px] font-semibold">{spec.label}</span>
-          {!spec.implemented && <span className="chip !text-warn" title="执行语义未实装，运行时会直通">占位</span>}
-          <span className="badge badge-blue ml-auto">{spec.type}</span>
-        </div>
-        <div className="mt-1.5 text-[11px] text-ink-3 leading-relaxed">{spec.description}</div>
-        <div className="mt-1 text-[11px] text-ink-3 font-mono">
-          node: {node.id} · schema: {spec.type}.config.v1
-        </div>
-      </div>
-
-      <div className="flex-1 overflow-y-auto px-4 py-3">
-        {Object.entries(schema.properties).map(([name, prop]) => {
-          if (spec.type === "llm" && name === "model") return <ModelField key={name} node={node} />;
-          if (spec.type === "llm" && name === "tool_ids") return <ToolBindField key={name} node={node} />;
-          if (spec.type === "tool" && name === "tool_id") return <ToolRefField key={name} node={node} />;
-          if (spec.type === "mcp" && name === "server_id") return <MCPRefField key={name} node={node} />;
-          // MCPRefField 已经把 server 与 tool 两个字段一起渲染，这里跳过 tool_name 避免重复
-          if (spec.type === "mcp" && name === "tool_name") return null;
-          if (spec.type === "knowledge" && name === "kb_id") return <KnowledgeRefField key={name} node={node} />;
-          if (spec.type === "skill" && name === "flow_id") return <SkillRefField key={name} node={node} />;
-          return <FieldControl key={name} node={node} prop={prop} name={name} />;
-        })}
-
-        {(spec.type === "condition" || spec.type === "loop") && <BranchEdgesField node={node} />}
-
-        {(localErrors.length > 0 || nodeServerErrors.length > 0) && (
-          <div className="border border-danger/30 bg-danger-50 rounded-sm px-3 py-2 text-[12px] text-danger">
-            <div className="font-semibold mb-1">配置校验失败</div>
-            <ul className="list-disc pl-4 space-y-0.5">
-              {localErrors.map((message, index) => <li key={`local-${index}`}>{message}</li>)}
-              {nodeServerErrors.map((issue, index) => <li key={`server-${index}`}>{issue.message}</li>)}
-            </ul>
+          <span className="node-ico" style={{ background: spec?.color ?? "#94a3b8" }}>{spec?.icon ?? "?"}</span>
+          <div className="min-w-0">
+            <div className="text-[13px] font-semibold">{spec?.label ?? node.type}</div>
+            <div className="text-[10px] font-mono text-ink-3">{node.id}</div>
           </div>
-        )}
+          <div className="ml-auto flex gap-2">
+            <button className="text-ink-3 hover:text-primary" title="复制节点" onClick={() => duplicateNode(node.id)}>
+              <Copy size={14} />
+            </button>
+            <button className="text-ink-3 hover:text-danger" title="删除节点" onClick={() => { removeNode(node.id); setSelected(null); }}>
+              <Trash2 size={14} />
+            </button>
+          </div>
+        </div>
+        {spec?.description && <div className="text-[11px] text-ink-3 mt-1.5 leading-relaxed">{spec.description}</div>}
       </div>
 
-      <div className="px-4 py-3 border-t border-line flex items-center gap-2">
-        <button className="btn flex-1" onClick={() => duplicateNode(node.id)}>
-          <Copy size={13} className="inline mr-1 -mt-0.5" />复制
-        </button>
-        <button className="btn flex-1 !text-danger !border-danger-200" onClick={() => removeNode(node.id)}>
-          <Trash2 size={13} className="inline mr-1 -mt-0.5" />删除
-        </button>
+      <div className="p-4">
+        {node.type === "start" && <StartConfig node={node} />}
+        {node.type === "agent" && <AgentConfigField node={node} />}
+        {node.type === "condition" && <ConditionConfig node={node} />}
+        {node.type === "loop" && <LoopConfig node={node} />}
+        {node.type === "human" && <HumanConfig node={node} />}
+        {node.type === "end" && <EndConfigField node={node} />}
       </div>
     </aside>
   );

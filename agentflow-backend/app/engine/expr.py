@@ -10,8 +10,17 @@
 import ast
 import re
 
-_TEMPLATE = re.compile(r"\{\{(\w+)\}\}")
+_TEMPLATE = re.compile(r"\{\{([\w.]+)\}\}")
 _KEYWORD_LITERALS = {"true": "True", "false": "False", "null": "None"}
+
+
+def _lookup(variables: dict, path: str):
+    value = variables
+    for part in path.split("."):
+        if not isinstance(value, dict) or part not in value:
+            raise KeyError(path)
+        value = value[part]
+    return value
 
 _ALLOWED = (
     ast.Expression, ast.BoolOp, ast.UnaryOp, ast.BinOp, ast.Compare,
@@ -34,10 +43,12 @@ def render_expression(expression: str, variables: dict) -> str:
 
     def _replace(match: re.Match) -> str:
         key = match.group(1)
-        if key not in variables:
+        try:
+            value = _lookup(variables, key)
+        except KeyError:
             missing.append(key)
             return match.group(0)
-        return repr(variables[key])
+        return repr(value)
 
     rendered = _TEMPLATE.sub(_replace, expression or "")
     if missing:

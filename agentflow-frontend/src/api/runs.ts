@@ -1,8 +1,11 @@
 import { api } from "./client";
-import type { Run, RunStats } from "@/types/run";
+import type { Run, RunStats, RunTargetType } from "@/types/run";
 
 export interface RunListParams {
+  targetType?: RunTargetType;
+  targetId?: string;
   flowId?: string;
+  agentId?: string;
   status?: string;
   startedAfter?: string;
   limit?: number;
@@ -13,7 +16,10 @@ export const runsApi = {
     api
       .get<Run[]>("/runs", {
         params: {
+          target_type: params.targetType || undefined,
+          target_id: params.targetId || undefined,
           flow_id: params.flowId || undefined,
+          agent_id: params.agentId || undefined,
           status: params.status || undefined,
           started_after: params.startedAfter || undefined,
           limit: params.limit,

@@ -28,7 +28,8 @@ from langgraph.errors import GraphRecursionError
 from langgraph.graph import END, START, StateGraph
 
 from app.config import settings
-from app.engine import extra_nodes, expr
+from app.engine.agent_runner import AgentRunError, run_agent
+from app.engine import expr
 from app.engine.common import (
     DEFAULT_STATE,
     dump_state,
@@ -37,10 +38,12 @@ from app.engine.common import (
     pause,
     write_state,
 )
-from app.engine.loop import StepLimitExceeded, _run_llm_node, _run_tool_node, render_template
+from app.engine.loop import StepLimitExceeded
+from app.models.agent import AgentVariable
 from app.models.flow import Flow, FlowNode
 from app.models.run import RunStatus
-from app.services import tool_runner
+from app.services import agent_service, flow_vars
+from app.services.agent_repo import AgentNotFound, get_agent
 from app.services.event_bus import event_bus, utc_now
 from app.services.llm import LLMConfig, LLMError
 from app.services.run_repo import load_run, update_run
@@ -77,7 +80,11 @@ class HumanPause(Exception):
 
 
 def _db_path() -> str:
-    return settings.DATABASE_PATH
+    """LangGraph checkpoint 独立一个库：和业务表共用会互相抢 SQLite 写锁。"""
+    from pathlib import Path
+
+    path = Path(settings.DATABASE_PATH)
+    return str(path.with_name(f"{path.stem}_checkpoints{path.suffix}"))
 
 
 def _recursion_limit(flow: Flow) -> int:
@@ -127,10 +134,9 @@ def build_graph(
             ),
         )
 
-    # 入口固定走 input 节点（校验保证有且仅有一个）：用入度判断会在「loop 回边」上翻车——
-    # 有环时所有节点入度都非 0，兜底取第一个节点可能取到循环体，从中间开始跑。
-    inputs = [node.id for node in flow.nodes if node.type == "input"]
-    entries = inputs or [flow.nodes[0].id]
+    # 入口固定走 start（校验保证有且仅有一个）
+    starts = [node.id for node in flow.nodes if node.type == "start"]
+    entries = starts or [flow.nodes[0].id]
     for entry in entries:
         graph.add_edge(START, entry)
 
@@ -164,6 +170,14 @@ def build_graph(
             graph.add_edge(node.id, edge.target)
 
     return graph
+
+
+def _cfg(config: dict, snake: str, camel: str | None = None, default=None):
+    if snake in config:
+        return config.get(snake)
+    if camel and camel in config:
+        return config.get(camel)
+    return default
 
 
 def _handle_target(edges: list, handle: str) -> str:
@@ -201,7 +215,6 @@ def _make_node_action(
     async def action(state: GraphState) -> dict:
         data = state["data"]
         resuming_human = node.type == "human" and node.id == resume_node
-        emit = extra_nodes.make_emitter(run_id, emit_events)
 
         if stop.is_set():
             raise GraphCancelled()
@@ -220,42 +233,127 @@ def _make_node_action(
 
         completed: dict[str, Any] = {"ok": True, "engine": ENGINE_NAME}
 
-        if node.type == "input":
-            name = str(node.config.get("name") or "query")
-            data["variables"].setdefault(name, node.config.get("default", ""))
+        if node.type == "start":
+            start_values: dict[str, Any] = {}
+            for index, raw in enumerate(_cfg(node.config, "variables", "variables", []) or []):
+                try:
+                    var = raw if isinstance(raw, AgentVariable) else AgentVariable.model_validate(raw)
+                except Exception as exc:  # noqa: BLE001
+                    raise AgentRunError(
+                        f"start 变量 {index} 不合法: {exc}", code="FLOW_VAR_INVALID"
+                    ) from exc
+                if var.key in data["variables"]:
+                    value = data["variables"][var.key]
+                elif var.required:
+                    raise AgentRunError(
+                        f"流程必选输入 {var.key} 没有提供", code="FLOW_VAR_UNBOUND"
+                    )
+                else:
+                    value = var.default if var.default is not None else ""
+                try:
+                    start_values[var.key] = agent_service.coerce_value(value, var.type, var.key)
+                except ValueError as exc:
+                    raise AgentRunError(str(exc), code="FLOW_VAR_INVALID") from exc
+            data["start"] = start_values
+            data["variables"].update(start_values)
+            completed["variables"] = start_values
 
-        elif node.type == "prompt":
-            template = str(node.config.get("template") or "")
-            data["variables"]["text"] = render_template(template, data["variables"])
+        elif node.type == "agent":
+            agent_id = str(_cfg(node.config, "agent_id", "agentId", "") or "")
+            try:
+                agent = await get_agent(agent_id)
+            except AgentNotFound as exc:
+                raise AgentRunError(f"Agent 不存在: {agent_id}", code="AGENT_NOT_FOUND") from exc
+            input_map = _cfg(node.config, "input_map", "inputMap", {}) or {}
+            context = flow_vars.flow_context(data)
+            mapped: dict[str, Any] = {}
+            for key, template in input_map.items():
+                try:
+                    mapped[key] = flow_vars.render_value(template, context)
+                except LookupError as exc:
+                    raise AgentRunError(
+                        f"inputMap.{key} 引用的变量不存在: {template}",
+                        code="FLOW_VAR_UNBOUND",
+                    ) from exc
 
-        elif node.type == "llm":
-            assert llm_config is not None
-            await _run_llm_node(
-                run_id, node, data, llm_config, stop, completed, limit
-            )
-            if stop.is_set():
-                raise GraphCancelled()
+            async def on_agent_event(event_type: str, payload: dict) -> None:
+                if emit_events:
+                    await event_bus.emit(
+                        run_id, event_type, node.id, {**payload, "agentId": agent.id}
+                    )
 
-        elif node.type == "output":
-            fields = node.config.get("fields") or ["text"]
-            if not isinstance(fields, list):
-                fields = [fields]
-            data["outputs"] = {
-                str(field): data["variables"].get(str(field))
-                for field in fields
-                if str(field) in data["variables"]
+            try:
+                result = await run_agent(
+                    agent,
+                    mapped,
+                    llm_config=llm_config,
+                    emit=on_agent_event,
+                    stop=lambda: stop.is_set(),
+                )
+            except AgentRunError as exc:
+                if exc.code == "RUN_CANCELLED":
+                    raise GraphCancelled() from exc
+                raise
+            data.setdefault("nodes", {})[node.id] = {
+                "agentId": agent.id,
+                "output": result.outputs,
+                "text": result.text,
             }
-            completed["outputs"] = data["outputs"]
+            data["tokens"] += result.tokens
+            data["cost"] += result.cost
+            data["steps"] += result.steps
+            data["model"] = result.model
+            data["tool_calls"].extend(result.tool_calls)
+            completed.update(
+                {
+                    "agentId": agent.id,
+                    "output": result.outputs,
+                    "text": result.text,
+                    "tokens": result.tokens,
+                    "cost": result.cost,
+                    "steps": result.steps,
+                }
+            )
 
-        elif node.type == "tool":
-            result = await _run_tool_node(run_id, node, data)
-            data["variables"]["result"] = result
-            completed["result"] = result
+        elif node.type == "end":
+            raw_outputs = _cfg(node.config, "outputs", "outputs", []) or []
+            context = flow_vars.flow_context(data)
+            outputs: dict[str, Any] = {}
+            if isinstance(raw_outputs, dict):
+                for key, template in raw_outputs.items():
+                    try:
+                        outputs[key] = flow_vars.render_value(template, context)
+                    except LookupError as exc:
+                        raise AgentRunError(
+                            f"end.outputs.{key} 引用的变量不存在: {template}",
+                            code="FLOW_VAR_UNBOUND",
+                        ) from exc
+            elif isinstance(raw_outputs, list):
+                for address in raw_outputs:
+                    try:
+                        value = flow_vars.render_value("{{" + str(address) + "}}", context)
+                    except LookupError as exc:
+                        raise AgentRunError(
+                            f"end.outputs 引用的变量不存在: {address}",
+                            code="FLOW_VAR_UNBOUND",
+                        ) from exc
+                    key = str(address).split(".")[-1]
+                    outputs[key] = value
+            if not outputs:
+                last_text = ""
+                for item in reversed(list(data.get("nodes", {}).values())):
+                    if isinstance(item, dict) and isinstance(item.get("text"), str):
+                        last_text = item["text"]
+                        break
+                outputs = {"text": last_text}
+            data["outputs"] = outputs
+            completed["outputs"] = outputs
 
         elif node.type == "condition":
             try:
                 passed, rendered = expr.evaluate_condition(
-                    str(node.config.get("expression") or ""), data["variables"]
+                    str(_cfg(node.config, "expression", "expression", "") or ""),
+                    flow_vars.flow_context(data),
                 )
             except expr.ConditionError as exc:
                 raise expr.ConditionError(f"{node.id}: {exc}") from exc
@@ -264,16 +362,18 @@ def _make_node_action(
             completed.update({"branch": "true" if passed else "false", "expression": rendered})
 
         elif node.type == "loop":
-            # 语义：max_rounds 数的是「循环体跑了几次」，不是「进过几次 loop 节点」。
-            # 进来时先判断要不要退：已跑满或退出条件为真 -> done，否则计一轮并进 body。
             rounds = int(data.setdefault("loop_rounds", {}).get(node.id, 0))
-            max_rounds = int(node.config.get("max_rounds") or 3)
+            max_rounds = int(_cfg(node.config, "max_rounds", "maxRounds", 3) or 3)
 
             should_exit = rounds >= max_rounds
-            exit_expression = str(node.config.get("exit_condition") or "").strip()
+            exit_expression = str(
+                _cfg(node.config, "exit_condition", "exitCondition", "") or ""
+            ).strip()
             if not should_exit and exit_expression:
                 try:
-                    should_exit, rendered_exit = expr.evaluate_condition(exit_expression, data["variables"])
+                    should_exit, rendered_exit = expr.evaluate_condition(
+                        exit_expression, flow_vars.flow_context(data)
+                    )
                     completed["exitExpression"] = rendered_exit
                 except expr.ConditionError as exc:
                     raise expr.ConditionError(f"{node.id}: {exc}") from exc
@@ -288,8 +388,8 @@ def _make_node_action(
             completed.update({"round": rounds, "maxRounds": max_rounds, "branch": branch})
 
         elif node.type == "human":
-            message = str(node.config.get("message") or "是否继续执行？")
-            timeout = node.config.get("timeout", 300)
+            message = str(_cfg(node.config, "message", "message", "是否继续执行？") or "")
+            timeout = _cfg(node.config, "timeout", "timeout", 300)
             if not resuming_human:
                 data["human_pending"] = node.id
                 if persist_state:
@@ -302,35 +402,12 @@ def _make_node_action(
                         node.id,
                         {"message": message, "timeout_s": timeout, "engine": ENGINE_NAME},
                     )
-                # 抛出后这一 superstep 作废，checkpoint 里 human_1 仍是「待执行」；
-                # 续跑时 aupdate_state 写回批复标记，再 ainvoke(None) 会重入这个节点
                 raise HumanPause(node.id)
 
             approved = bool(data.get("human_approved", True))
             data["human_pending"] = None
             data["variables"]["approved"] = approved
             completed["approved"] = approved
-
-        elif node.type == "mcp":
-            result = await extra_nodes.run_mcp_node(node, data, emit=emit)
-            data["variables"]["result"] = result
-            completed["result"] = result
-
-        elif node.type == "knowledge":
-            completed.update(await extra_nodes.run_knowledge_node(node, data, emit=emit))
-
-        elif node.type == "skill":
-            completed.update(
-                await extra_nodes.run_skill_node(node, data, stop=stop, llm_config=llm_config)
-            )
-
-        elif node.type in PLACEHOLDER_NODES:
-            completed.update(
-                {
-                    "skipped": True,
-                    "reason": f"{node.type} 节点的执行语义将在后续轮次实装，本轮直通",
-                }
-            )
 
         data["current_node"] = None
         if persist_state:
@@ -352,6 +429,8 @@ async def run_graph(
 ) -> None:
     data = copy.deepcopy(DEFAULT_STATE)
     data["variables"] = {**(data.get("variables") or {}), **inputs}
+    data["start"] = dict(inputs)
+    data["nodes"] = {}
     data["flow_id"] = flow.id
 
     await update_run(
@@ -381,6 +460,8 @@ async def resume_graph(run_id: str, flow: Flow, *, stop: asyncio.Event) -> None:
     run = await load_run(run_id)
     data = copy.deepcopy(run.state or copy.deepcopy(DEFAULT_STATE))
     data.setdefault("variables", {})
+    data.setdefault("start", {})
+    data.setdefault("nodes", {})
     data.setdefault("outputs", {})
     data["flow_id"] = flow.id
     # API 只在 approved=True 时才会走到这里（拒绝走 cancel），这里显式记一笔给 human 节点读
@@ -510,16 +591,9 @@ async def _fail(run_id: str, data: dict, exc: Exception) -> None:
             "modelFromNode": bool(override),
             "hint": hint,
         }
-    elif isinstance(exc, tool_runner.ToolError):
-        code = exc.code
-        message = (
-            f"{exc}（节点 {node_id} 的工具调用失败，详见「工具管理」的调用记录；"
-            "可先在工具管理里试跑该工具确认参数与超时设置）"
-        )
-        extra = {"code": code, "nodeId": node_id, "toolError": True}
-    elif isinstance(exc, extra_nodes.NodeError):
+    elif isinstance(exc, AgentRunError):
         message = str(exc)
-        extra = {"code": exc.code, "nodeId": node_id}
+        extra = {"code": exc.code, "nodeId": node_id, "agentError": True}
     else:
         message = f"{type(exc).__name__}: {exc}"
         extra = {}

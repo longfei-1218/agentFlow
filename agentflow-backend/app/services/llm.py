@@ -109,6 +109,7 @@ async def stream_completion(
     temperature: float | None = None,
     max_tokens: int | None = None,
     tools: list[dict] | None = None,
+    tool_choice: str | dict | None = None,
 ) -> AsyncIterator[LLMDelta]:
     """逐帧吐模型输出；调用方负责把 delta 写进事件流。
 
@@ -135,7 +136,7 @@ async def stream_completion(
     }
     if tools:
         payload["tools"] = tools
-        payload["tool_choice"] = "auto"
+        payload["tool_choice"] = tool_choice or "auto"
 
     price = price_for(payload["model"])
     prompt_text = "".join(str(message.get("content", "")) for message in messages)

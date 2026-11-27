@@ -1,16 +1,12 @@
-"""会话与聊天轮次的持久化（R5.1）。
-
-历史只在「已成功的 run」上构建：失败/运行中的轮次不进 prompt，
-避免把错误信息或空回复喂给下一轮模型。
-"""
-import orjson
+"""Agent 会话与聊天轮次：作用域 agent_id + flow_id + node_id。"""
 import uuid
+
+import orjson
 
 from app.database import db
 from app.models.chat import ChatMessage, ChatTurnResult, Conversation
 from app.services.event_bus import utc_now
 
-# 先做保守的硬截断；后续长短期记忆（摘要 / 向量召回）会替换这里
 HISTORY_MAX_TURNS = 6
 HISTORY_MAX_CHARS = 3000
 
@@ -20,7 +16,7 @@ class ConversationNotFound(LookupError):
 
 
 def answer_text(outputs: dict | None) -> str:
-    """从 output 节点产物里取一句可展示的回答。"""
+    """从 Agent / end 产物里取一句可展示的回答。"""
     if not outputs:
         return ""
     if not isinstance(outputs, dict):
@@ -29,9 +25,11 @@ def answer_text(outputs: dict | None) -> str:
         value = outputs.get(key)
         if isinstance(value, str) and value.strip():
             return value
-        if isinstance(value, (dict, list)):
-            return orjson.dumps(value, option=orjson.OPT_NON_STR_KEYS).decode()
     for value in outputs.values():
+        if isinstance(value, dict):
+            nested = answer_text(value)
+            if nested:
+                return nested
         if isinstance(value, str) and value.strip():
             return value
     return orjson.dumps(outputs, option=orjson.OPT_NON_STR_KEYS).decode()
@@ -40,27 +38,40 @@ def answer_text(outputs: dict | None) -> str:
 def _row_to_conversation(row) -> Conversation:
     return Conversation(
         id=row["id"],
+        agent_id=row["agent_id"],
         flow_id=row["flow_id"],
+        node_id=row["node_id"],
         title=row["title"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
 
 
-async def create_conversation(flow_id: str, title: str = "") -> Conversation:
+async def create_conversation(
+    agent_id: str,
+    *,
+    flow_id: str | None = None,
+    node_id: str | None = None,
+    title: str = "",
+) -> Conversation:
     now = utc_now()
     conversation = Conversation(
         id=f"conv_{uuid.uuid4().hex[:12]}",
+        agent_id=agent_id,
         flow_id=flow_id,
+        node_id=node_id,
         title=title.strip() or "新对话",
         created_at=now,
         updated_at=now,
     )
     await db.execute(
-        "INSERT INTO conversations (id, flow_id, title, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO conversations (id, agent_id, flow_id, node_id, title, created_at, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
         (
             conversation.id,
+            conversation.agent_id,
             conversation.flow_id,
+            conversation.node_id,
             conversation.title,
             conversation.created_at,
             conversation.updated_at,
@@ -69,15 +80,51 @@ async def create_conversation(flow_id: str, title: str = "") -> Conversation:
     return conversation
 
 
-async def list_conversations(flow_id: str | None = None) -> list[Conversation]:
+async def find_or_create_conversation(
+    agent_id: str,
+    *,
+    flow_id: str | None = None,
+    node_id: str | None = None,
+    title: str = "",
+) -> Conversation:
+    sql = "SELECT * FROM conversations WHERE agent_id = ?"
+    params: list = [agent_id]
+    for column, value in (("flow_id", flow_id), ("node_id", node_id)):
+        if value is None:
+            sql += f" AND {column} IS NULL"
+        else:
+            sql += f" AND {column} = ?"
+            params.append(value)
+    rows = await db.fetchall(sql + " ORDER BY updated_at DESC LIMIT 1", params)
+    if rows:
+        return _row_to_conversation(rows[0])
+    return await create_conversation(
+        agent_id, flow_id=flow_id, node_id=node_id, title=title
+    )
+
+
+async def list_conversations(
+    agent_id: str | None = None,
+    *,
+    flow_id: str | None = None,
+    node_id: str | None = None,
+) -> list[Conversation]:
+    where: list[str] = []
+    params: list = []
+    if agent_id:
+        where.append("agent_id = ?")
+        params.append(agent_id)
     if flow_id:
-        rows = await db.fetchall(
-            "SELECT * FROM conversations WHERE flow_id = ? ORDER BY updated_at DESC",
-            (flow_id,),
-        )
-    else:
-        rows = await db.fetchall("SELECT * FROM conversations ORDER BY updated_at DESC")
-    return [_row_to_conversation(row) for row in rows]
+        where.append("flow_id = ?")
+        params.append(flow_id)
+    if node_id:
+        where.append("node_id = ?")
+        params.append(node_id)
+    sql = "SELECT * FROM conversations"
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY updated_at DESC"
+    return [_row_to_conversation(row) for row in await db.fetchall(sql, params)]
 
 
 async def get_conversation(conversation_id: str) -> Conversation:

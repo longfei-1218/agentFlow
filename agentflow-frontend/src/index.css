@@ -30,6 +30,7 @@ body { overflow: hidden; }
   .badge-cyan { @apply bg-cyan-50 text-cyan; }
   .badge-gray { @apply bg-slate-100 text-ink-2; }
   .field { @apply w-full border border-line rounded-sm px-2.5 py-1.5 text-[13px] outline-none focus:border-primary; }
+  .section-title { @apply text-[13px] font-semibold text-ink; }
 }
 
 /* React Flow 画布与 UI 稿保持一致 */

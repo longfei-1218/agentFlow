@@ -32,6 +32,7 @@ class Database:
         conn = await aiosqlite.connect(path)
         conn.row_factory = aiosqlite.Row
         await conn.execute("PRAGMA journal_mode = WAL")
+        await conn.execute("PRAGMA busy_timeout = 5000")
         await conn.execute("PRAGMA foreign_keys = ON")
         await conn.executescript(INIT_SQL.read_text(encoding="utf-8"))
         await _migrate(conn)

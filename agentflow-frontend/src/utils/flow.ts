@@ -12,10 +12,17 @@ export interface AgentNodeData extends Record<string, unknown> {
 export type AgentNode = Node<AgentNodeData, "agent">;
 
 export function flowToNodes(flow: Flow, runtime: Record<string, RuntimeState>): AgentNode[] {
-  return flow.nodes.map((node) => ({
+  // 演示 / 导入的流程可能所有节点都塞在 (0,0)。全部重合时按数组顺序横向铺开，
+  // 只在展示层兜底；用户拖动后写回真实坐标，不再自动排列。
+  const allOverlapped = flow.nodes.length > 1
+    && flow.nodes.every((node) => !node.position || (node.position.x === 0 && node.position.y === 0));
+
+  return flow.nodes.map((node, index) => ({
     id: node.id,
     type: "agent",
-    position: node.position,
+    position: allOverlapped
+      ? { x: 80 + index * 280, y: 160 }
+      : node.position,
     data: {
       nodeType: node.type,
       config: node.config,
@@ -50,38 +57,29 @@ export function flowToEdges(flow: Flow): Edge[] {
   });
 }
 
+/** 新流程只有 start / end：Agent、条件、循环、审批由用户按需拖入。 */
 export const createDefaultFlow = (name = "未命名流程"): FlowCreate => ({
   name,
+  dslVersion: 2,
   nodes: [
     {
-      id: "input_1",
-      type: "input",
-      position: { x: 80, y: 160 },
-      config: { name: "query", type: "string", default: "" },
-    },
-    {
-      id: "llm_1",
-      type: "llm",
-      position: { x: 360, y: 160 },
+      id: "start_1",
+      type: "start",
+      position: { x: 80, y: 180 },
       config: {
-        // 留空 = 跟随「模型设置」里的默认模型；写死厂商模型名换网关就 400
-        model: "",
-        temperature: 0.7,
-        max_tokens: 1024,
-        system: "你是一个有帮助的助手。",
+        variables: [
+          { key: "query", label: "用户输入", type: "string", required: true, default: null, description: "" },
+        ],
       },
     },
     {
-      id: "output_1",
-      type: "output",
-      position: { x: 640, y: 160 },
-      config: { fields: ["text"] },
+      id: "end_1",
+      type: "end",
+      position: { x: 640, y: 180 },
+      config: { outputs: [] },
     },
   ],
-  edges: [
-    { id: "e_1", source: "input_1", target: "llm_1" },
-    { id: "e_2", source: "llm_1", target: "output_1" },
-  ],
+  edges: [],
 });
 
 export function downloadFlow(flow: Flow): void {

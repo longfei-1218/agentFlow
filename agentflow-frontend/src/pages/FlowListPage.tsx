@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { Copy, GitBranch, MessageSquare, Plus, Trash2 } from "lucide-react";
+import { Copy, GitBranch, Plus, Trash2 } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { flowsApi } from "@/api/flows";
 import { runsApi } from "@/api/runs";
@@ -34,7 +34,11 @@ export function FlowListPage() {
   };
 
   const handleDuplicate = async (flow: Flow) => {
-    await flowsApi.create({ name: `${flow.name} 副本`, nodes: flow.nodes, edges: flow.edges });
+    if (flow.dslVersion !== 2) {
+      window.alert("旧 DSL 流程不支持复制，请新建 v2 流程。");
+      return;
+    }
+    await flowsApi.create({ name: `${flow.name} 副本`, dslVersion: 2, nodes: flow.nodes, edges: flow.edges });
     await load();
   };
 
@@ -48,7 +52,7 @@ export function FlowListPage() {
       <div className="flex items-center justify-between mb-5">
         <div>
           <h1 className="text-[20px] font-semibold">流程编排</h1>
-          <p className="text-[12px] text-ink-3 mt-1">在画布上定义节点拓扑，配置参数后运行并观测全流程事件。</p>
+          <p className="text-[12px] text-ink-3 mt-1">流程只编排开始 / Agent / 分支 / 循环 / 审批 / 结束；Agent 定义在 Agent 库。</p>
         </div>
         <div className="flex gap-2 items-center">
           <span className="chip">共 {flows.length} 个流程</span>
@@ -82,7 +86,9 @@ export function FlowListPage() {
                   </span>
                   <div className="min-w-0">
                     <div className="font-semibold text-[14px] truncate">{flow.name}</div>
-                    <div className="text-[11px] text-ink-3 font-mono">v{flow.version} · {flow.id}</div>
+                    <div className="text-[11px] text-ink-3 font-mono">
+                      {flow.dslVersion === 2 ? "DSL v2" : `旧 DSL v${flow.dslVersion}`} · 发布 v{flow.version}
+                    </div>
                   </div>
                 </div>
 
@@ -95,13 +101,6 @@ export function FlowListPage() {
                 <div className="mt-4 pt-3 border-t border-line flex items-center justify-between text-[11px] text-ink-3">
                   <span>{flow.nodes.length} 个节点 · {flow.edges.length} 条连线</span>
                   <span className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                    <button
-                      className="p-1 hover:text-primary"
-                      title="对话"
-                      onClick={(e) => { e.stopPropagation(); navigate(`/flows/${flow.id}/chat`); }}
-                    >
-                      <MessageSquare size={14} />
-                    </button>
                     <button
                       className="p-1 hover:text-primary"
                       title="复制"

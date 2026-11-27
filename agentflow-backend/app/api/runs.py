@@ -28,6 +28,9 @@ _TERMINAL_EVENTS = {"run_completed", "run_failed"}
 @router.get("", response_model=list[Run])
 async def list_runs(
     flow_id: str | None = Query(default=None),
+    agent_id: str | None = Query(default=None),
+    target_type: str | None = Query(default=None),
+    target_id: str | None = Query(default=None),
     status: str | None = Query(default=None),
     started_after: str | None = Query(default=None, description="ISO 时间下界（含）"),
     started_before: str | None = Query(default=None, description="ISO 时间上界（含）"),
@@ -36,8 +39,17 @@ async def list_runs(
     where: list[str] = []
     params: list = []
     if flow_id:
-        where.append("flow_id = ?")
+        where.append("target_type = 'flow' AND target_id = ?")
         params.append(flow_id)
+    if agent_id:
+        where.append("target_type = 'agent' AND target_id = ?")
+        params.append(agent_id)
+    if target_type:
+        where.append("target_type = ?")
+        params.append(target_type)
+    if target_id:
+        where.append("target_id = ?")
+        params.append(target_id)
     if status:
         where.append("status = ?")
         params.append(status)
@@ -174,11 +186,19 @@ async def cancel_run(run_id: str):
 
     run_manager.request_cancel(run_id)
     if run_manager.is_active(run_id):
-        # 取消是协作式的：等执行器自己写终态，避免两边同时改状态
+        # 取消是协作式的：等执行器自己写终态，避免两边同时改状态。
+        # 但 waiting_human 的 run 已经没有前进动作，任务退栈时不会写 cancelled，
+        # 所以等它结束后还要兜底收尾，否则前端会看到「点了拒绝仍是等待中」。
         await run_manager.wait(run_id, timeout=3.0)
-        return await load_run(run_id)
+        run = await load_run(run_id)
+        if run.status in TERMINAL_STATUSES:
+            return run
+        if run_manager.is_active(run_id):
+            # 3 秒内没停下（比如长 LLM 调用还没吐第一帧）：不能替执行器写终态，
+            # 否则它稍后还会把 succeeded 写回来。保持 running，前端可再点一次取消。
+            return run
 
-    # 没有活跃任务（比如服务重启后遗留的 run）：由 API 直接收尾
+    # 没有活跃任务，或活跃任务已经退栈但没有写终态：由 API 收尾
     await event_bus.emit(run_id, "run_failed", payload={"error": "用户取消", "cancelled": True})
     await update_run(
         run_id, status=RunStatus.CANCELLED.value, error="用户取消", finished_at=utc_now()
@@ -197,7 +217,9 @@ async def resume_run(run_id: str, payload: dict | None = None):
     if not approved:
         return await cancel_run(run_id)
 
-    flow = await load_flow(run.flow_id)
+    if run.target_type != "flow":
+        raise HTTPException(status_code=409, detail="Agent 运行没有人工审批续跑")
+    flow = await load_flow(run.target_id)
     # 暂停是「写库 + 抛异常收尾」两步：状态先变 waiting_human，执行任务可能还在退栈。
     # 不等它退完就 launch 会撞上「同一 run 已有执行任务」。手动点得快就会复现，所以这里等一下。
     if not await run_manager.wait(run_id, timeout=3):

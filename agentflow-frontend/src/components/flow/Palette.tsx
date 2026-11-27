@@ -61,7 +61,7 @@ export function Palette() {
       ))}
 
       <div className="text-[11px] text-ink-3 leading-relaxed pt-2 border-t border-line">
-        节点定义由后端 <span className="font-mono">GET /api/node-types</span> 下发，拖拽到画布即可。condition 节点需分别连接 true / false。
+        只有 6 类编排节点。提示词、模型、工具、MCP、知识库都收进 Agent 库；Agent 节点引用一个全局 Agent，条件节点需分别连接 true / false。
       </div>
     </aside>
   );

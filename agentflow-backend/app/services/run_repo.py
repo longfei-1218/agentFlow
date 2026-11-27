@@ -23,8 +23,9 @@ WRITABLE_FIELDS = {
 def row_to_run(row) -> Run:
     return Run(
         id=row["id"],
-        flow_id=row["flow_id"],
-        flow_version=row["flow_version"],
+        target_type=row["target_type"],
+        target_id=row["target_id"],
+        flow_version=row["flow_version"] or 1,
         status=RunStatus(row["status"]),
         inputs=orjson.loads(row["inputs_json"]),
         outputs=orjson.loads(row["outputs_json"]) if row["outputs_json"] else None,

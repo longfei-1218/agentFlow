@@ -1,31 +1,26 @@
-"""R2-1：节点 Schema 注册表与配置校验。"""
+"""R2-1（v2）：6 类节点 Schema 与配置校验。"""
 from helpers import create_flow, edge, node
 
 
-async def test_node_types_exposes_all_node_schemas(client):
+async def test_node_types_exposes_six_v2_schemas(client):
     response = await client.get("/api/node-types")
     assert response.status_code == 200
     data = response.json()
 
-    assert data["categories"] == ["基础", "模型", "工具", "控制"]
+    assert data["categories"] == ["基础", "Agent", "控制"]
     types = {item["type"]: item for item in data["types"]}
-    assert len(types) == 11, "节点库必须与前端 palette 的 11 类节点一致"
+    assert set(types) == {"start", "agent", "condition", "loop", "human", "end"}
 
-    llm = types["llm"]
-    assert llm["configSchema"]["properties"]["system"]["title"] == "System Prompt"
-    assert llm["configSchema"]["properties"]["max_tokens"]["minimum"] == 1
-    assert llm["defaultConfig"]["model"] == ""
-    assert llm["implemented"] is True
-
-    # 11 类节点的执行语义都已实装（R5 收掉 mcp/skill/knowledge 的占位）
-    for node_type in ("mcp", "skill", "knowledge", "condition", "loop"):
+    assert types["agent"]["configSchema"]["properties"]["agentId"]["title"] == "Agent"
+    assert types["agent"]["defaultConfig"]["inputMap"] == {}
+    assert types["start"]["defaultConfig"]["variables"][0]["key"] == "query"
+    assert types["end"]["defaultConfig"]["outputs"] == []
+    for node_type in types:
         assert types[node_type]["implemented"] is True, node_type
-    assert types["mcp"]["configSchema"]["properties"]["args_template"]["title"] == "参数模板"
-    assert types["knowledge"]["configSchema"]["properties"]["top_k"]["maximum"] == 20
 
-    assert data["engine"] in {"graph", "loop"}  # 测试夹具把引擎锁成 loop，默认是 graph
+    assert data["engine"] in {"graph", "loop"}
     assert {"graph", "loop", "demo"} <= set(data["engines"])
-    assert data["llmConfigured"] is True  # 测试桩给了一个假 key
+    assert data["llmConfigured"] is True
 
 
 async def test_node_type_detail_and_unknown_type(client):
@@ -41,19 +36,18 @@ async def test_flow_validation_reports_bad_node_config(client):
     flow = await create_flow(
         client,
         [
-            node("input_1", "input", name="query"),
-            node("llm_1", "llm", 200, system="", max_tokens=0),
-            node("output_1", "output", 400, fields=["text"]),
+            node("start_1", "start", variables=[{"key": "query", "type": "string"}]),
+            node("cond_1", "condition", expression=""),
+            node("end_1", "end", outputs=[]),
         ],
-        [edge("e_1", "input_1", "llm_1"), edge("e_2", "llm_1", "output_1")],
+        [edge("e_1", "start_1", "cond_1"), edge("e_2", "cond_1", "end_1", "true")],
         name="配置非法",
     )
     result = (await client.post(f"/api/flows/{flow['id']}/validate")).json()
 
     assert result["valid"] is False
     issues = result["errors"]
-    assert any(issue["nodeId"] == "llm_1" and "system" in issue["message"] for issue in issues)
-    assert any(issue["nodeId"] == "llm_1" and "max_tokens" in issue["message"] for issue in issues)
+    assert any(issue["nodeId"] == "cond_1" and "expression" in issue["message"] for issue in issues)
 
 
 async def test_valid_default_flow_passes_config_validation(client):

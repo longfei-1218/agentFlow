@@ -15,6 +15,8 @@ from app.services.run_repo import update_run
 DEFAULT_STATE = {
     "cursor": 0,
     "variables": {},
+    "start": {},          # v2：start 节点的输入变量
+    "nodes": {},          # v2：每个 agent 节点的 {output,text,agentId}
     "tokens": 0,          # 累计 token（含输入+输出）
     "prompt_tokens": 0,
     "completion_tokens": 0,
@@ -25,24 +27,19 @@ DEFAULT_STATE = {
     "model": None,
     "tool_calls": [],     # R3：本次 run 里真实执行过的工具调用摘要
     "tool_errors": [],    # R3：FC 里回给模型的工具错误（不致命，但要留痕）
-    "outputs": {},        # R4：output 节点产出的字段（图执行器直接写在 state 里）
-    "branch": {},         # R4：condition / loop 节点本轮走的分支，条件边据此路由
-    "loop_rounds": {},    # R4：每个 loop 节点已经跑了第几轮
+    "outputs": {},        # end 节点产出的字段
+    "branch": {},         # condition / loop 节点本轮走的分支，条件边据此路由
+    "loop_rounds": {},    # 每个 loop 节点已经跑了第几轮
 }
 
-# 节点在 node_started 事件里露出的摘要字段：让界面显示「模型/温度」而不是整坨 config
+# 节点在 node_started 事件里露出的摘要字段
 NODE_SUMMARY_KEYS = {
-    "llm": ["model", "temperature", "max_tokens", "tool_ids"],
-    "prompt": ["template"],
-    "input": ["name", "type"],
-    "output": ["fields"],
-    "tool": ["tool_id", "args_template"],
-    "mcp": ["server_id", "tool_name"],
-    "knowledge": ["kb_id", "top_k", "rerank"],
+    "start": ["variables"],
+    "agent": ["agent_id", "agentId", "input_map", "inputMap"],
     "condition": ["expression"],
-    "loop": ["max_rounds", "exit_condition"],
+    "loop": ["max_rounds", "maxRounds", "exit_condition", "exitCondition"],
     "human": ["message"],
-    "skill": ["flow_id"],
+    "end": ["outputs"],
 }
 
 

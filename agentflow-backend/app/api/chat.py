@@ -1,16 +1,13 @@
-"""对话模式 API（R5.1）：会话 CRUD + 每轮触发一次流程 run。
-
-这一层只做「会话 → 一次普通 run」的转译：执行、SSE、取消、回放全部复用
-现有 run 体系，不新增执行器。
-"""
+"""Agent 对话 API：会话 + 每轮一次 Agent Run。"""
 import uuid
 
 import orjson
 from fastapi import APIRouter, Response, status
 from fastapi.responses import JSONResponse
 
-from app.database import db
-from app.engine import executor
+from app.engine.agent_runner import AgentRunError
+from app.engine.agent_task import create_agent_run, start_agent_run
+from app.models.agent import Agent
 from app.models.chat import (
     ChatTurnCreate,
     ChatTurnResult,
@@ -18,7 +15,8 @@ from app.models.chat import (
     ConversationCreate,
     ConversationDetail,
 )
-from app.models.run import Run, RunStatus
+from app.models.run import RunStatus
+from app.services import agent_repo, agent_service
 from app.services.chat_repo import (
     ConversationNotFound,
     add_turn,
@@ -26,14 +24,14 @@ from app.services.chat_repo import (
     conversation_messages,
     create_conversation,
     delete_conversation,
+    find_or_create_conversation,
     get_conversation,
     list_conversations,
     touch_conversation,
     turn_count,
 )
-from app.services.event_bus import event_bus, utc_now
+from app.services.event_bus import event_bus
 from app.services.flow_repo import load_flow
-from app.services.flow_service import validate_flow
 from app.services.run_manager import run_manager
 from app.services.run_repo import max_seq
 from app.services.settings_repo import get_llm_config
@@ -48,15 +46,65 @@ def _not_found(message: str) -> JSONResponse:
     )
 
 
+def _chat_variable(agent: Agent) -> str | None:
+    if any(var.key == "query" for var in agent.variables):
+        return "query"
+    for var in agent.variables:
+        if var.type == "string":
+            return var.key
+    return None
+
+
 @router.post("/conversations", response_model=Conversation, status_code=status.HTTP_201_CREATED)
 async def create(payload: ConversationCreate):
-    flow = await load_flow(payload.flow_id)
-    return await create_conversation(flow.id, payload.title or flow.name)
+    try:
+        agent = await agent_repo.get_agent(payload.agent_id)
+    except agent_repo.AgentNotFound as exc:
+        return JSONResponse(
+            status_code=404,
+            content={"code": "AGENT_NOT_FOUND", "message": str(exc), "detail": None},
+        )
+    if payload.flow_id or payload.node_id:
+        if not (payload.flow_id and payload.node_id):
+            return JSONResponse(
+                status_code=422,
+                content={
+                    "code": "CHAT_SCOPE_INVALID",
+                    "message": "flowId 与 nodeId 必须同时提供，或都不提供",
+                    "detail": None,
+                },
+            )
+        flow = await load_flow(payload.flow_id)
+        node = next((item for item in flow.nodes if item.id == payload.node_id), None)
+        node_agent_id = ""
+        if node is not None:
+            node_agent_id = str(
+                node.config.get("agent_id") or node.config.get("agentId") or ""
+            )
+        if node is None or node.type != "agent" or node_agent_id != agent.id:
+            return JSONResponse(
+                status_code=422,
+                content={
+                    "code": "CHAT_SCOPE_INVALID",
+                    "message": "flowId/nodeId 没有指向该 Agent 的流程节点",
+                    "detail": None,
+                },
+            )
+    return await create_conversation(
+        agent.id,
+        flow_id=payload.flow_id,
+        node_id=payload.node_id,
+        title=payload.title or agent.name,
+    )
 
 
 @router.get("/conversations", response_model=list[Conversation])
-async def list_all(flow_id: str | None = None):
-    return await list_conversations(flow_id)
+async def list_all(
+    agent_id: str | None = None,
+    flow_id: str | None = None,
+    node_id: str | None = None,
+):
+    return await list_conversations(agent_id, flow_id=flow_id, node_id=node_id)
 
 
 @router.get("/conversations/{conversation_id}", response_model=ConversationDetail)
@@ -90,83 +138,61 @@ async def send_turn(conversation_id: str, payload: ChatTurnCreate):
     except ConversationNotFound as exc:
         return _not_found(str(exc))
 
-    flow = await load_flow(conversation.flow_id)
-    validation = validate_flow(flow)
-    if not validation.valid:
+    try:
+        agent = await agent_repo.get_agent(conversation.agent_id)
+    except agent_repo.AgentNotFound as exc:
+        return JSONResponse(
+            status_code=404,
+            content={"code": "AGENT_NOT_FOUND", "message": str(exc), "detail": None},
+        )
+
+    chat_var = _chat_variable(agent)
+    if chat_var is None:
         return JSONResponse(
             status_code=422,
             content={
-                "code": "FLOW_INVALID",
-                "message": "流程校验未通过，无法在对话里执行",
-                "detail": [issue.model_dump(by_alias=True) for issue in validation.errors],
-            },
-        )
-
-    # 对话模式暂不做审批：父 run 暂停后聊天页没有对应的批准入口，先明确拒绝
-    if any(node.type == "human" for node in flow.nodes):
-        return JSONResponse(
-            status_code=409,
-            content={
-                "code": "CHAT_HUMAN_UNSUPPORTED",
-                "message": "对话模式暂不支持含人工审批（human）节点的流程，请先在该流程里去掉审批，或改用编辑器运行",
+                "code": "AGENT_INPUT_MISSING",
+                "message": "Agent 没有可接收消息的字符串变量（建议定义 query）",
                 "detail": None,
             },
         )
 
-    if any(node.type == "llm" for node in flow.nodes):
-        llm = await get_llm_config()
-        if not llm.configured:
-            return JSONResponse(
-                status_code=409,
-                content={
-                    "code": "LLM_NOT_CONFIGURED",
-                    "message": "尚未配置 LLM API Key，请先在「模型设置」里填写后再对话",
-                    "detail": None,
-                },
-            )
+    variables = dict(payload.variables)
+    variables[chat_var] = payload.content.strip()
+    if any(var.key == "history" for var in agent.variables):
+        variables["history"] = await build_history(conversation_id)
 
-    content = payload.content.strip()
-    history = await build_history(conversation_id)
-    inputs = {"query": content, "history": history}
+    try:
+        variables = agent_service.normalize_variables(agent, variables)
+    except ValueError as exc:
+        return JSONResponse(
+            status_code=422,
+            content={"code": "AGENT_INPUT_MISSING", "message": str(exc), "detail": None},
+        )
 
-    run = Run(
-        id=f"run_{uuid.uuid4().hex[:8]}",
-        flow_id=flow.id,
-        flow_version=flow.version,
-        status=RunStatus.PENDING,
-        inputs=inputs,
-        started_at=utc_now(),
-        conversation_id=conversation_id,
-    )
-    await db.execute(
-        "INSERT INTO runs (id, flow_id, flow_version, status, inputs_json, state_json, "
-        "token_usage, cost, started_at, conversation_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (
-            run.id,
-            flow.id,
-            flow.version,
-            run.status.value,
-            orjson.dumps(inputs).decode(),
-            "{}",
-            0,
-            0.0,
-            run.started_at,
-            conversation_id,
-        ),
-    )
+    llm = await get_llm_config()
+    if not llm.configured:
+        return JSONResponse(
+            status_code=409,
+            content={
+                "code": "LLM_NOT_CONFIGURED",
+                "message": "尚未配置 LLM API Key，请先在「模型设置」里填写后再对话",
+                "detail": None,
+            },
+        )
 
+    run = await create_agent_run(agent, variables, conversation_id=conversation_id)
     is_first = await turn_count(conversation_id) == 0
-    turn_id = await add_turn(conversation_id, content, run.id)
-    if is_first and conversation.title in ("新对话", flow.name):
-        title = content.splitlines()[0][:24].strip()
+    turn_id = await add_turn(conversation_id, payload.content.strip(), run.id)
+    if is_first and conversation.title in ("新对话", agent.name):
+        title = payload.content.strip().splitlines()[0][:24]
         await touch_conversation(conversation_id, title=title or conversation.title)
 
     event_bus.seed_seq(run.id, await max_seq(run.id))
-    stop = run_manager.cancel_token(run.id)
-    run_manager.launch(run.id, executor.start(run.id, flow, inputs, stop=stop))
+    run_manager.launch(run.id, start_agent_run(run.id, agent, variables))
     return ChatTurnResult(
         conversation_id=conversation_id,
         turn_id=turn_id,
         run_id=run.id,
-        status=run.status.value,
+        status=RunStatus.PENDING.value,
     )

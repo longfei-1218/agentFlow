@@ -1,16 +1,31 @@
 # AgentFlow Studio · 后端
 
-FastAPI + aiosqlite + sse-starlette + httpx + LangGraph。当前进度：**B5 + R5.1 完成**（MCP stdio 客户端、知识库 BM25 检索、skill 子流程内联；对话模式）。
+FastAPI + aiosqlite + sse-starlette + httpx + LangGraph。当前进度：**v2 后端（Agent 库 + Flow v2 + Agent 对话）已完成到步骤 3**；**前端步骤 4 已完成**：Agent 库 / 编辑器 / 作用域对话、Flow 六类节点画布、运行历史 target 化；后端 58 条测试与前端 tsc/build 均通过。
 
 ## 已实现
 
-**Flow**
-- CRUD、`POST /api/flows/{id}/validate`（结构规则 + **逐节点按注册表 Schema 校验配置**）
-- 版本语义：`PUT` 只更新内容（草稿自动保存不递增 version），`POST /api/flows/{id}/publish` 才 +1
-- `nodes/edges` 为 `null` 时补默认三节点；显式传 `[]` 是合法的空白画布
-- `POST /api/flows/{id}/run`：先校验再执行；非法流程 422 `FLOW_INVALID`；**未配置模型 409 `LLM_NOT_CONFIGURED`**
+**Agent v2（步骤 2）**
+- `app/models/agent.py` + `app/services/agent_repo.py` + `app/services/agent_service.py` + `app/api/agents.py`：全局 Agent 库，字段 `name / description / variables / prompt{system,template} / resources / model / output`；整份定义存 `agents.definition_json`。
+- API：`GET/POST /api/agents`、`GET/PUT/DELETE /api/agents/{id}`、`POST /api/agents/validate`、`POST /api/agents/{id}/validate`、`POST /api/agents/{id}/run`（同步调试）、`POST /api/agents/{id}/runs`（202 + SSE）。
+- 校验：变量 key/类型/默认值、资源别名唯一、`@kb[alias]` / `@tool[alias]` / `@mcp[alias.tool]` 可解析、资源存在且启用、输出 Schema 形状；`/{id}/validate` 额外探测 MCP 工具清单。
+- `app/engine/agent_runner.py`：变量合并/类型转换 → `@kb` 检索并注入上下文 → 未 `@` 的 Tool/MCP 作为 FC 候选、`@tool/@mcp` 强制调用 → FC 多轮 → 输出 JSON Schema 校验（失败重试一次）。工具失败回填 `tool` 消息，不直接打断 Agent；正文为空时区分 `finish_reason=length` 与「只有思维链」，报 `AGENT_EMPTY_ANSWER`。支持协作式 `stop`，取消后不会再写回终态。
 
-**节点与设置（R2）**
+**Flow v2（步骤 3）**
+- `NodeType` 只剩 `start / agent / condition / loop / human / end`；`GET /api/node-types` 导出 6 类 Schema。新建流程默认 `start_1 -> end_1`，`dslVersion=2`；旧 DSL 在 update / publish / validate / run 四个入口统一返回 HTTP 422 `FLOW_DSL_LEGACY`（`detail=null`，message 明确「该流程是旧 DSL」）。
+- `agent` 节点配置 `{agentId, inputMap}`：`inputMap` 按 `{{start.x}}` / `{{<nodeId>.output.field}}` / `{{<nodeId>.text}}` 取值，产物写 `state.nodes.<nodeId> = {agentId, output, text}`；`end.outputs` 支持列表或对象，空列表回退最后一个 Agent 的 `text`。
+- `app/services/flow_vars.py` 负责点路径模板；`app/engine/expr.py` 的 condition/loop 表达式同样支持点路径。
+- `app/services/flow_service.py`：结构校验（start/end 唯一、condition true/false、loop body、孤立节点、环检测）＋异步运行期校验（Agent 存在、inputMap 键属于 Agent 变量、必选变量已映射、变量路径可解析）。
+- `app/engine/graph_runner.py`：v2 流程强制走 LangGraph；`start` 注入 `inputs`，`agent` 调 `AgentRunner`，`end` 解析 outputs；condition/loop/human 沿用原有语义。checkpoint 独立到 `data/agentflow_checkpoints.db`，不再和业务表抢 SQLite 写锁。
+- `runs` 改为 `target_type = flow|agent` + `target_id` + `flow_version`；`GET /api/runs?flow_id=/agent_id=/target_type=/target_id=`；resume 仅允许 flow。
+- Agent 会话作用域 `agent_id + flow_id + node_id`：库内直聊只有 `agent_id`；同一 Agent 在不同流程节点各聊各的。每轮对话建一条 `target_type=agent` 的 run，历史只回灌当前会话已成功的 run。
+- 演示数据：`scripts/seed_v2_demo.py` 写入「演示-通用对话」「演示-售后知识库问答」和「演示-两 Agent 串联」「演示-循环条件审批」；`--smoke` 跑真实 DeepSeek 冒烟 + 三作用域两轮历史隔离检查。
+
+**前端（步骤 4，`agentflow-frontend/`）**
+- `/agents` Agent 库、`/agents/:id` 表单编辑器、`/agents/:id/chat` 作用域对话；删除旧 `/flows/:id/chat`。
+- `/flows/:id` 只渲染 6 类节点；Agent 节点配置 Agent 下拉 + `inputMap` 变量映射 + 「编辑 / 对话」；开始变量、条件 true/false、循环 body/done、审批、结束 outputs 列表/对象。
+- 运行输入弹窗按 start 变量收集；运行历史按 `targetType/targetId` 展示 Flow / Agent；旧 DSL 编辑器给出提示且禁用运行。
+
+> 下面从「节点与设置（R2）」开始是旧 R1–R5 章节，对应代码已在步骤 3 删除，仅作历史记录；步骤 5 统一清理。
 - `app/nodes/registry.py`：11 类节点各一个 Pydantic 配置模型，`GET /api/node-types` 直接导出 JSON Schema + `defaultConfig` + `implemented`
 - `GET /api/settings/llm` / `PUT /api/settings/llm` / `POST /api/settings/llm/test` / `GET /api/settings/llm/models`：Key 存库（`settings` 表），只回脱敏预览；优先级 **DB > .env**；`/models` 把网关支持的模型清单交给前端做下拉（网关不支持该接口时返回 `ok:false`，前端退回手填）
 - `app/services/llm.py`：OpenAI 兼容 `/chat/completions` 流式（httpx，不引 SDK）；优先用 provider 的 `usage` 计费，拿不到按字符估算并在收尾补校准帧；支持 `tools` 数组与**分片**的 `delta.tool_calls` 累积
@@ -106,20 +121,17 @@ Swagger: http://localhost:8000/docs
 ## 测试
 
 ```bash
-.venv\Scripts\python.exe -m pytest      # 71 passed（约 25s）
+.venv\Scripts\python.exe -m pytest      # 58 passed（v2：Flow v2 / Agent / 对话 / Run 生命周期）
 ```
 
-覆盖：Flow 版本语义与校验、节点配置校验、节点 Schema 导出、Key 脱敏与优先级、
-SSE 到终态、筛选、节点统计、取消、审批续跑、序号恢复、真流式 token 帧与 usage 校准、
-`MAX_STEPS` 守卫、未配 Key 的 409 与无模型流程照常可跑、
-工具 CRUD 与重名 409、内置 Schema 覆盖、参数缺失拒绝、5xx 重试到第 3 次成功、**4xx 不重试**、
-幂等命中、tool 节点真执行并落调用记录、工具不存在失败、**FC 两轮回路**、FC 逐轮计步、两次 run 的 state 隔离、
-**图引擎线性执行**、条件分支只走一条、表达式变量缺失报错、有界循环跑满/退出条件提前退出、
-**human 暂停后从 checkpoint 续跑且不重复 node_started**、取消不被后台任务改写、
-思维链吃满预算的空回答提示、`finish_reason=length` 截断的空回答提示、
-**MCP 真起子进程探测 + 调用（add=42）**、spawn 失败回错误码、mcp 节点发 `tool_call(source=mcp)`、空 server 配置失败、停用 Server 运行期被拒、
-**知识库切块/BM25 排序/MMR**、空库 hint、knowledge 节点注入 `context`、删文档重算计数、
-**子流程 outputs 合并 + tokens 计入父 run**、自递归被拦、含 human 子流程被拒。
+覆盖：Flow v2 默认 start/end、版本语义、旧 DSL 专用错误码 `FLOW_DSL_LEGACY`（validate/publish/run/put）、结构校验（唯一入口出口、条件双分支、环检测）、
+6 类节点 Schema、Agent 配置错误、两个 Agent 经 `inputMap` 串联、condition 只走 true、loop 跑满 body 后 done、
+human 暂停/批准续跑/拒绝取消、必选变量未映射、Agent CRUD 与定义校验、AgentRunner 变量渲染/@tool 强制/Schema 重试/空回答、
+Agent 异步 run + SSE token、Flow run SSE、按 flow 筛选、节点统计、Agent run 取消（协作式 stop）、序号恢复、
+Agent 对话每轮一个 run、两轮历史回灌、库内 vs 两个流程节点作用域隔离、节点归属校验、
+工具 CRUD/重试/4xx 不重试/幂等、MCP 真起子进程探测、知识库切块/BM25、设置 Key 脱敏与优先级。
+
+真实冒烟（`scripts/seed_v2_demo.py --smoke`，DeepSeek）：两 Agent 串联、循环+条件+审批、同一 Agent 三作用域各两轮历史不串。
 
 ## 下一步
 
@@ -129,3 +141,5 @@ SSE 到终态、筛选、节点统计、取消、审批续跑、序号恢复、�
 | B4 ✅ | LangGraph 图执行器：条件边、有界循环、checkpointer 中断续跑 |
 | B5 ✅ | MCP stdio 客户端 / 知识库切块 + BM25/MMR / skill 子流程内联 |
 | B6 | 评测体系（三层采集器 / pass^k / judge / 门禁）与 Docker |
+| 前端 ✅ | Agent 库 / 编辑器 / 作用域对话；Flow v2 画布与运行输入；运行历史 target 化 |
+| 下一步 | 步骤 5 全量验证、删旧 DSL 类型/测试/文档段落、README/acceptance 收尾 |

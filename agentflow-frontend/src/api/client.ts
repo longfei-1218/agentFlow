@@ -13,6 +13,8 @@ export class ApiError extends Error {
     public code: string,
     message: string,
     public detail: ApiIssue[] = [],
+    /** 原始 detail：Agent 校验返回的是 {valid,errors,warnings} 对象，不是 issue 数组 */
+    public rawDetail: unknown = null,
   ) {
     super(message);
     this.name = "ApiError";
@@ -47,6 +49,7 @@ api.interceptors.response.use(
       data?.code ?? "NETWORK_ERROR",
       data?.message ?? error.message ?? "请求失败",
       normalizeIssues(data?.detail),
+      data?.detail,
     );
   },
 );

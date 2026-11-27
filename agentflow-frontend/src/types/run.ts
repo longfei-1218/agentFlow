@@ -17,9 +17,12 @@ export interface RunEvent {
   createdAt: string;
 }
 
+export type RunTargetType = "flow" | "agent";
+
 export interface Run {
   id: string;
-  flowId: string;
+  targetType: RunTargetType;
+  targetId: string;
   flowVersion: number;
   status: RunStatus;
   inputs: Record<string, unknown>;

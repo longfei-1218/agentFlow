@@ -9,8 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from pydantic.alias_generators import to_camel
 
 NodeType = Literal[
-    "input", "llm", "prompt", "tool", "mcp",
-    "skill", "knowledge", "condition", "loop", "human", "output",
+    "start", "agent", "condition", "loop", "human", "end",
 ]
 
 
@@ -36,6 +35,8 @@ class Flow(CamelModel):
     id: str
     name: str
     version: int = 1
+    # 1 = R1–R5 旧 DSL；2 = start/agent/condition/loop/human/end
+    dsl_version: int = 1
     nodes: list[FlowNode]
     edges: list[FlowEdge]
     created_at: str | None = None
@@ -52,6 +53,7 @@ class FlowCreate(CamelModel):
     服务端发现已经被别人改过就拒绝覆盖（防两个标签页互相回滚配置）。
     """
     name: str = "未命名流程"
+    dsl_version: int = 2
     nodes: list[FlowNode] | None = None
     edges: list[FlowEdge] | None = None
     base_updated_at: str | None = None

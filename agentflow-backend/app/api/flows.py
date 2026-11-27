@@ -12,7 +12,7 @@ from app.models.flow import Flow, FlowCreate, FlowEdge, FlowNode
 from app.models.run import Run, RunStatus
 from app.services.event_bus import event_bus, utc_now
 from app.services.flow_repo import load_flow, row_to_flow, save_flow
-from app.services.flow_service import validate_flow
+from app.services.flow_service import validate_flow_runtime
 from app.services.run_manager import run_manager
 from app.services.run_repo import max_seq
 from app.services.settings_repo import get_llm_config
@@ -22,34 +22,24 @@ router = APIRouter(prefix="/flows", tags=["flows"])
 _DEFAULT_FLOW = {
     "nodes": [
         {
-            "id": "input_1",
-            "type": "input",
+            "id": "start_1",
+            "type": "start",
             "position": {"x": 80, "y": 160},
-            "config": {"name": "query", "type": "string", "default": ""},
-        },
-        {
-            "id": "llm_1",
-            "type": "llm",
-            "position": {"x": 360, "y": 160},
             "config": {
-                # 故意留空：跟随「模型设置」里的默认模型。
-                # 写死某个厂商的模型名，换网关后就会 400（真实踩过）。
-                "model": "",
-                "temperature": 0.7,
-                "max_tokens": 1024,
-                "system": "你是一个有帮助的助手。",
+                "variables": [
+                    {"key": "query", "label": "用户输入", "type": "string", "required": True}
+                ]
             },
         },
         {
-            "id": "output_1",
-            "type": "output",
-            "position": {"x": 640, "y": 160},
-            "config": {"fields": ["text"]},
+            "id": "end_1",
+            "type": "end",
+            "position": {"x": 360, "y": 160},
+            "config": {"outputs": []},
         },
     ],
     "edges": [
-        {"id": "e_1", "source": "input_1", "target": "llm_1"},
-        {"id": "e_2", "source": "llm_1", "target": "output_1"},
+        {"id": "e_1", "source": "start_1", "target": "end_1"},
     ],
 }
 
@@ -59,12 +49,25 @@ def _now() -> str:
 
 
 def _invalid_flow_response(errors) -> JSONResponse:
+    if errors and errors[0].node_id is None and "旧 DSL" in errors[0].message:
+        return _legacy_flow_response()
     return JSONResponse(
         status_code=422,
         content={
             "code": "FLOW_INVALID",
             "message": "流程校验未通过，无法执行",
             "detail": [issue.model_dump(by_alias=True) for issue in errors],
+        },
+    )
+
+
+def _legacy_flow_response() -> JSONResponse:
+    return JSONResponse(
+        status_code=422,
+        content={
+            "code": "FLOW_DSL_LEGACY",
+            "message": "该流程是旧 DSL（dslVersion != 2），不支持编辑、校验或运行；请新建 v2 流程",
+            "detail": None,
         },
     )
 
@@ -90,6 +93,7 @@ async def create_flow(payload: FlowCreate):
         id=f"flow_{uuid.uuid4().hex[:8]}",
         name=payload.name,
         version=1,
+        dsl_version=2,
         nodes=nodes,
         edges=edges,
         created_at=now,
@@ -123,6 +127,8 @@ async def update_flow(flow_id: str, payload: FlowCreate):
     编辑十分钟就能涨到几十上百，P4 的按版本对比会直接失真。
     """
     existing = await load_flow(flow_id)
+    if existing.dsl_version != 2:
+        return _legacy_flow_response()
 
     # 乐观锁：只有当调用方明确给出 baseUpdatedAt 时才校验（老调用/脚本不受影响）。
     # 没有这道闸，一个开着不动的旧标签页点「运行」会先 save() 把服务端改过的配置原地覆盖回去。
@@ -147,6 +153,7 @@ async def update_flow(flow_id: str, payload: FlowCreate):
         id=flow_id,
         name=payload.name,
         version=existing.version,
+        dsl_version=2,
         nodes=payload.nodes if payload.nodes is not None else existing.nodes,
         edges=payload.edges if payload.edges is not None else existing.edges,
         created_at=existing.created_at,
@@ -159,7 +166,9 @@ async def update_flow(flow_id: str, payload: FlowCreate):
 async def publish_flow(flow_id: str):
     """显式发布：version + 1，评测按此版本做回归对比。"""
     existing = await load_flow(flow_id)
-    result = validate_flow(existing)
+    if existing.dsl_version != 2:
+        return _legacy_flow_response()
+    result = await validate_flow_runtime(existing)
     if not result.valid:
         return _invalid_flow_response(result.errors)
     flow = existing.model_copy(update={"updated_at": _now()})
@@ -176,19 +185,24 @@ async def delete_flow(flow_id: str):
 
 @router.post("/{flow_id}/validate")
 async def validate_flow_endpoint(flow_id: str):
-    return validate_flow(await load_flow(flow_id))
+    flow = await load_flow(flow_id)
+    if flow.dsl_version != 2:
+        return _legacy_flow_response()
+    return await validate_flow_runtime(flow)
 
 
 @router.post("/{flow_id}/run", response_model=Run, status_code=status.HTTP_202_ACCEPTED)
 async def start_run(flow_id: str, payload: dict | None = None):
     flow = await load_flow(flow_id)
+    if flow.dsl_version != 2:
+        return _legacy_flow_response()
 
-    result = validate_flow(flow)
+    result = await validate_flow_runtime(flow)
     if not result.valid:
         return _invalid_flow_response(result.errors)
 
-    # 真实执行器要模型；没配 Key 就不要创建 run 再让它失败，直接把用户引到设置页
-    if executor.runner_name() == "loop" and any(node.type == "llm" for node in flow.nodes):
+    # Agent 节点需要模型；没配 Key 就不要创建 run 再让它失败
+    if any(node.type == "agent" for node in flow.nodes):
         llm = await get_llm_config()
         if not llm.configured:
             return JSONResponse(
@@ -203,19 +217,21 @@ async def start_run(flow_id: str, payload: dict | None = None):
     inputs = (payload or {}).get("inputs", {}) if payload else {}
     run = Run(
         id=f"run_{uuid.uuid4().hex[:8]}",
-        flow_id=flow_id,
+        target_type="flow",
+        target_id=flow_id,
         flow_version=flow.version,
         status=RunStatus.PENDING,
         inputs=inputs,
         started_at=utc_now(),
     )
     await db.execute(
-        "INSERT INTO runs (id, flow_id, flow_version, status, inputs_json, state_json, "
-        "token_usage, cost, started_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO runs (id, target_type, target_id, flow_version, status, inputs_json, state_json, "
+        "token_usage, cost, started_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             run.id,
-            flow_id,
-            flow.version,
+            run.target_type,
+            run.target_id,
+            run.flow_version,
             run.status.value,
             orjson.dumps(inputs).decode(),
             "{}",

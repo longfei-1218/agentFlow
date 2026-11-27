@@ -22,6 +22,12 @@ def runner_name() -> str:
 
 
 async def start(run_id: str, flow: Flow, inputs: dict, *, stop: asyncio.Event) -> None:
+    if flow.dsl_version == 2:
+        from app.engine.graph_runner import run_graph
+
+        await run_graph(run_id, flow, inputs, stop=stop)
+        return
+
     name = runner_name()
     if name == "demo":
         await run_demo_flow(run_id, flow, inputs, stop=stop)
@@ -36,6 +42,12 @@ async def start(run_id: str, flow: Flow, inputs: dict, *, stop: asyncio.Event) -
 
 
 async def resume(run_id: str, flow: Flow, *, stop: asyncio.Event) -> None:
+    if flow.dsl_version == 2:
+        from app.engine.graph_runner import resume_graph
+
+        await resume_graph(run_id, flow, stop=stop)
+        return
+
     name = runner_name()
     if name == "demo":
         await resume_demo_flow(run_id, flow, stop=stop)

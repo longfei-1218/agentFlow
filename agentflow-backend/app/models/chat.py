@@ -1,9 +1,9 @@
-"""对话模式（R5.1）：一个会话绑定一个流程，每轮用户消息创建一个 run。
+"""Agent 对话契约：作用域 = agentId + flowId? + nodeId?。
 
-助手回复不落独立表：`chat_turns.run_id` 指向 runs，读取时按 run 终态回填，
-这样运行中/失败/刷新都能从同一份事实源恢复。
+库内直聊只有 agentId；从流程节点进入时带 flowId/nodeId，
+同一 Agent 在不同流程/节点各聊各的，不共享历史。
 """
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import Field, field_validator
 
@@ -11,13 +11,17 @@ from app.models.flow import CamelModel
 
 
 class ConversationCreate(CamelModel):
-    flow_id: str
+    agent_id: str
+    flow_id: str | None = None
+    node_id: str | None = None
     title: str = ""
 
 
 class Conversation(CamelModel):
     id: str
-    flow_id: str
+    agent_id: str
+    flow_id: str | None = None
+    node_id: str | None = None
     title: str
     created_at: str
     updated_at: str
@@ -41,6 +45,8 @@ class ConversationDetail(Conversation):
 
 class ChatTurnCreate(CamelModel):
     content: str = Field(min_length=1, max_length=8000)
+    # 变量面板：除 query 之外的必选变量
+    variables: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("content")
     @classmethod

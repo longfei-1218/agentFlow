@@ -74,51 +74,6 @@ async def test_empty_kb_search_gives_actionable_hint(client):
     assert "还没有文档" in (body["hint"] or "")
 
 
-async def test_knowledge_node_injects_context_into_variables(client):
-    kb = await _create_kb(client, name="节点检索库")
-    await client.post(
-        f"/api/knowledge/{kb['id']}/documents",
-        json={"title": "退款政策", "content": REFUND_DOC},
-    )
-    await client.post(
-        f"/api/knowledge/{kb['id']}/documents",
-        json={"title": "发票说明", "content": INVOICE_DOC},
-    )
-
-    flow = await create_flow(
-        client,
-        [
-            node("input_1", "input", name="query"),
-            node("kb_1", "knowledge", 200, kb_id=kb["id"], top_k=2, query_template="{{query}}"),
-            node("output_1", "output", 400, fields=["context", "citations"]),
-        ],
-        [edge("e_1", "input_1", "kb_1"), edge("e_2", "kb_1", "output_1")],
-        name="知识库检索",
-    )
-
-    run = (
-        await client.post(
-            f"/api/flows/{flow['id']}/run", json={"inputs": {"query": "退款多久到账"}}
-        )
-    ).json()
-    await wait_for_status(client, run["id"], {"succeeded"})
-    final = (await client.get(f"/api/runs/{run['id']}")).json()
-
-    context = final["outputs"]["context"]
-    assert "退款政策" in context and "退款" in context
-    assert final["outputs"]["citations"][0]["title"] == "退款政策"
-
-    from app.services.event_bus import event_bus
-    import orjson
-
-    history = await event_bus.history(run["id"])
-    dumped = orjson.dumps(
-        [{"type": event.type, "nodeId": event.node_id, "payload": event.payload} for event in history]
-    ).decode()
-    assert '"knowledge_retrieved"' in dumped
-    assert '"hits":' in dumped
-
-
 async def test_delete_document_recounts_kb(client):
     kb = await _create_kb(client, name="删文档")
     doc = (

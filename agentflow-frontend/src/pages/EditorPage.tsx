@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { ReactFlowProvider } from "@xyflow/react";
-import { AlertTriangle, ArrowLeft, CheckCircle2, MessagesSquare, Rocket, Save, X } from "lucide-react";
+import { AlertTriangle, ArrowLeft, CheckCircle2, Rocket, Save, X } from "lucide-react";
 import { useNavigate, useParams } from "react-router-dom";
 import { ApiError, type ApiIssue } from "@/api/client";
 import { flowsApi } from "@/api/flows";
@@ -9,6 +9,7 @@ import { ConfigPanel } from "@/components/flow/ConfigPanel";
 import { FlowCanvas } from "@/components/flow/FlowCanvas";
 import { Palette } from "@/components/flow/Palette";
 import { RunDrawer } from "@/components/flow/RunDrawer";
+import { RunInputsDialog } from "@/components/flow/RunInputsDialog";
 import { useFlowEvents } from "@/hooks/useFlowEvents";
 import { useFlowStore } from "@/store/flowStore";
 import { useRunStore } from "@/store/runStore";
@@ -24,6 +25,8 @@ export function EditorPage() {
   const navigate = useNavigate();
   const [issueOpen, setIssueOpen] = useState(false);
   const [actionError, setActionError] = useState<ActionError | null>(null);
+  const [runOpen, setRunOpen] = useState(false);
+  const [runBusy, setRunBusy] = useState(false);
 
   const flow = useFlowStore((s) => s.flow);
   const dirty = useFlowStore((s) => s.dirty);
@@ -83,44 +86,52 @@ export function EditorPage() {
     return () => window.removeEventListener("focus", onFocus);
   }, [flow.id, flow.updatedAt, dirty, loadFlow]);
 
-  const handleRun = useCallback(async () => {
+  const handleRun = useCallback(async (inputs: Record<string, unknown>) => {
     setActionError(null);
-    const valid = await validate();
-    if (!valid) {
-      setIssueOpen(true);
-      return;
-    }
+    setRunBusy(true);
     try {
+      const valid = await validate();
+      if (!valid) {
+        setRunOpen(false);
+        setIssueOpen(true);
+        return;
+      }
       // 只在有改动时保存：没动过的旧标签页直接跑服务端版本，
-      // 否则它会把这里早已修好的配置（比如节点模型）原样覆盖回去
+      // 否则它会把这里早已修好的配置原样覆盖回去
       if (dirty) await save();
-      const run = await flowsApi.run(flow.id);
+      const run = await flowsApi.run(flow.id, inputs);
       reset();
       setRunId(run.id);
       setStatus(run.status);
+      setRunOpen(false);
     } catch (error) {
       if (error instanceof ApiError) {
         setActionError({ message: error.message, issues: error.detail });
+        setRunOpen(false);
         if (error.detail.length > 0) setIssueOpen(true);
         if (error.code === "LLM_NOT_CONFIGURED") openSettings();
         return;
       }
       setActionError({ message: "运行请求失败", issues: [] });
+      setRunOpen(false);
+    } finally {
+      setRunBusy(false);
     }
   }, [validate, save, flow.id, dirty, reset, setRunId, setStatus, openSettings]);
 
-  const handleOpenChat = useCallback(async () => {
+  const handleValidate = useCallback(async () => {
     setActionError(null);
     try {
-      if (dirty) await save();
-      navigate(`/flows/${flow.id}/chat`);
+      await validate();
+      setIssueOpen(true);
     } catch (error) {
-      setActionError({
-        message: error instanceof Error ? error.message : "保存失败，无法进入对话",
-        issues: error instanceof ApiError ? error.detail : [],
-      });
+      if (error instanceof ApiError) {
+        setActionError({ message: error.message, issues: error.detail });
+        return;
+      }
+      setActionError({ message: "校验请求失败", issues: [] });
     }
-  }, [dirty, save, flow.id, navigate]);
+  }, [validate]);
 
   const handlePublish = async () => {
     setActionError(null);
@@ -182,8 +193,9 @@ export function EditorPage() {
           onChange={(event) => rename(event.target.value)}
         />
         <span className="chip" title="发布版本：只有发布才 +1，自动保存不会变动">v{flow.version}</span>
+        <span className="chip" title="当前流程 DSL 版本">DSL v{flow.dslVersion}</span>
         {!llmConfigured && (
-          <button className="chip !text-warn !border-warn/40" onClick={openSettings} title="没有 API Key，含 llm 节点的流程无法运行">
+          <button className="chip !text-warn !border-warn/40" onClick={openSettings} title="没有 API Key，含 Agent 节点的流程无法运行">
             未配置模型 · 点此设置
           </button>
         )}
@@ -202,10 +214,7 @@ export function EditorPage() {
           </button>
         )}
         <div className="ml-auto flex items-center gap-2">
-          <button className="btn" onClick={() => void handleOpenChat()}>
-            <MessagesSquare size={13} className="inline mr-1 -mt-0.5" />对话
-          </button>
-          <button className="btn" onClick={() => void validate().then(() => setIssueOpen(true))}>
+          <button className="btn" onClick={() => void handleValidate()}>
             <CheckCircle2 size={13} className="inline mr-1 -mt-0.5" />校验
           </button>
           <button className="btn" onClick={() => void save()}>
@@ -216,6 +225,13 @@ export function EditorPage() {
           </button>
         </div>
       </div>
+
+      {flow.dslVersion !== 2 && (
+        <div className="flex-shrink-0 border-b border-warn/40 bg-warn-50 px-4 py-2 text-[12px] text-warn">
+          这个流程是旧 DSL（dslVersion={flow.dslVersion}），不能编辑、发布或运行。请新建一个 v2 流程，
+          把提示词 / 模型 / 工具 / 知识库放进 Agent 库后重新编排。
+        </div>
+      )}
 
       {actionError && (
         <div className="flex-shrink-0 border-b border-danger/30 bg-danger-50 px-4 py-2 flex items-start gap-2">
@@ -263,11 +279,19 @@ export function EditorPage() {
         <ConfigPanel />
       </div>
 
+      <RunInputsDialog
+        open={runOpen}
+        flow={flow}
+        busy={runBusy}
+        onClose={() => setRunOpen(false)}
+        onRun={(inputs) => void handleRun(inputs)}
+      />
+
       <RunDrawer
-        onRun={() => void handleRun()}
+        onRun={() => setRunOpen(true)}
         onCancel={() => void handleCancel()}
         onApprove={(approved) => void handleApprove(approved)}
-        canRun={runStatus === "pending" || runStatus === "succeeded" || runStatus === "failed" || runStatus === "cancelled"}
+        canRun={flow.dslVersion === 2 && (runStatus === "pending" || runStatus === "succeeded" || runStatus === "failed" || runStatus === "cancelled")}
       />
     </div>
   );

@@ -2,6 +2,84 @@
 
 > 每轮结束都补齐本节内容：**自动化命令 + 手工步骤 + 期望结果 + 联调判断点**。
 > 约定：后端命令都在 `agentflow-backend/` 下执行，前端都在 `agentflow-frontend/` 下执行。
+>
+> **2026-11-27 当前口径：后端与前端均已切到 Flow v2（start/agent/condition/loop/human/end）。下面 R1–R5 章节里的旧节点步骤已不适用，仅作历史记录；步骤 5 统一重写。**
+
+## 步骤 4 验收（前端一次性切换）
+
+### A. 自动化
+
+```powershell
+cd agentflow-frontend
+node node_modules\typescript\bin\tsc --noEmit
+node node_modules\vite\bin\vite.js build
+```
+
+期望：tsc 0 错误；Vite build 成功（仅有 607 kB chunk 体积提示，不是失败）。
+
+后端定向与全量：
+
+```powershell
+cd agentflow-backend
+.venv\Scripts\python.exe -m pytest tests\test_flows.py tests\test_flow_v2.py   # 16 passed
+.venv\Scripts\python.exe -m pytest                                            # 58 passed
+```
+
+### B. 浏览器手工检查（真实 DeepSeek，2026-11-27 已执行）
+
+| 检查 | 入口 | 期望 |
+|---|---|---|
+| Agent 库 | `/agents` | 2 个演示 Agent 卡片；有「编辑 / 对话 / 删除」；「新建 Agent」可创建并进入编辑器 |
+| Agent 编辑器 | `/agents/:id` | 变量表 / system+template / 资源导入 / 模型 / 输出 Schema 均可编辑；点「保存」后出现「已保存」「校验通过」 |
+| 节点作用域对话 | `/agents/:id/chat?flowId=...&nodeId=...` | 顶部显示 `节点作用域 <nodeId>`，只运行该 Agent；一轮真实回复成功（129 tokens，¥0.000562）；会话计数 1（不再重复创建） |
+| Flow 画布 | `/flows/:id` | Palette 只有开始/Agent/分支/循环/审批/结束；Agent 节点下拉能选中 Agent，变量映射显示 query/history；配置面板有「编辑 Agent」「对话」且链接带 flowId/nodeId |
+| Flow 运行 | 编辑器「运行」 | 弹出开始变量输入；填 query 后跑通两 Agent 串联：4 节点、2 次模型调用、360 tokens、3.1s，状态成功 |
+| 运行历史 | `/runs` | Flow 与 Agent 两类目标都显示名称；类型列 Flow v1 / Agent；跳转分别指向 `/flows/:id` 与 `/agents/:id` |
+
+### C. 已知限制
+
+- 旧 DSL 流程不迁移；编辑器只显示提示，validate/publish/run/put 返回 `FLOW_DSL_LEGACY`。
+- Agent 资源导入为逐条添加；MCP 工具靠探测勾选，未做资源库批量导入。
+- `inputMap` 不限制只能引用直接上游；运行历史不支持名称搜索。
+- 步骤 5 仍需跑 §8 五条完整浏览器验收并清理旧 DSL 类型/测试/文档段落。
+
+
+## 步骤 3 验收（Flow v2 + Agent 对话）
+
+### A. 自动化
+
+```powershell
+cd agentflow-backend
+.venv\Scripts\python.exe -m pytest      # 58 passed（全量）
+```
+
+覆盖重点：两 Agent `inputMap` 串联、condition 只走 true、loop 跑满 body 后 done、human 暂停/批准/拒绝、必选变量未映射、旧 DSL 拒绝、Agent run SSE/token、协作式取消、Agent 会话三作用域隔离。
+
+### B. 真实冒烟
+
+```powershell
+cd agentflow-backend
+.venv\Scripts\python.exe scripts\seed_v2_demo.py --smoke
+```
+
+期望输出四行：
+
+1. `两 Agent 串联: succeeded`，`outputs.reply` 是售后知识库口径的退款回答；
+2. `循环/条件/审批 暂停: waiting_human`；
+3. `审批后完成: succeeded`；
+4. `历史隔离检查通过：每个作用域只回灌自己的历史`。
+
+### C. 手工检查（后端 API）
+
+| 检查 | 命令/入口 | 期望 |
+|---|---|---|
+| Flow v2 契约 | `GET /api/node-types` | 只有 6 类；categories 为 `基础/Agent/控制` |
+| 默认流程 | `POST /api/flows {"name":"x"}` | nodes 为 `start,end`，`dslVersion=2` |
+| 旧 DSL | 直接构造 `dsl_version=1` 的 Flow 调 validate | HTTP 422，`code=FLOW_DSL_LEGACY`，message 含「旧 DSL」 |
+| 演示数据 | `GET /api/agents` / `GET /api/flows` | 2 个 `演示-*` Agent、2 条 `演示-*` 流程 |
+| Run 过滤 | `GET /api/runs?agent_id=...` | 只返回 `targetType=agent` 的该 Agent run |
+| 会话作用域 | `GET /api/chat/conversations?agent_id=&flow_id=&node_id=` | 三个作用域各自独立，不共用会话 |
+
 
 ## 环境准备（只做一次）
 
@@ -388,7 +466,7 @@ Invoke-RestMethod -Uri http://127.0.0.1:8000/api/flows/flow_1c485778/run -Method
 
 ```powershell
 cd agentflow-backend
-.venv\Scripts\python.exe -m pytest          # 71 passed（约 25s；66 + 对话 5）
+.venv\Scripts\python.exe -m pytest          # 81 passed（当前 v2 后端；含 Agent 10 条，旧 R5.1 基线为 71）
 
 cd ..\agentflow-frontend
 node node_modules\typescript\bin\tsc --noEmit   # 无输出

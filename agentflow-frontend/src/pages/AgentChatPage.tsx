@@ -1,11 +1,17 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { fetchEventSource } from "@microsoft/fetch-event-source";
-import { ArrowLeft, MessagesSquare, Plus, Send, Trash2 } from "lucide-react";
-import { Link, useParams } from "react-router-dom";
-import { chatApi, type ChatMessage, type Conversation, type ConversationDetail } from "@/api/chat";
-import { flowsApi } from "@/api/flows";
-import type { Flow } from "@/types/flow";
+import { ArrowLeft, Bot, MessagesSquare, Plus, Send, Settings2, Trash2 } from "lucide-react";
+import { Link, useParams, useSearchParams } from "react-router-dom";
+import { agentsApi } from "@/api/agents";
 import { ApiError } from "@/api/client";
+import { chatApi, type ChatMessage, type Conversation, type ConversationDetail } from "@/api/chat";
+import {
+  chatVariable,
+  textToVariable,
+  variableToText,
+  type Agent,
+  type AgentVariable,
+} from "@/types/agent";
 
 const STATUS_LABEL: Record<string, string> = {
   pending: "排队中",
@@ -29,15 +35,19 @@ function lastPendingAssistant(messages: ChatMessage[]): ChatMessage | undefined 
     );
 }
 
-export function ChatPage() {
-  // 路由是 /flows/:id/chat，参数名是 id；这里必须解构 id，否则 flowId 恒为空，
-  // 列表会退化成“全部会话”，看起来就是所有流程共享同一份历史
-  const { id: flowId = "" } = useParams<{ id: string }>();
-  const [flow, setFlow] = useState<Flow | null>(null);
+export function AgentChatPage() {
+  const { id: agentId = "" } = useParams<{ id: string }>();
+  const [searchParams] = useSearchParams();
+  const flowId = searchParams.get("flowId") ?? "";
+  const nodeId = searchParams.get("nodeId") ?? "";
+
+  const [agent, setAgent] = useState<Agent | null>(null);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [active, setActive] = useState<ConversationDetail | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
+  const [variableText, setVariableText] = useState<Record<string, string>>({});
+  const [showVariables, setShowVariables] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
@@ -45,6 +55,22 @@ export function ChatPage() {
 
   const listRef = useRef<HTMLDivElement | null>(null);
   const composingRef = useRef(false);
+  const initializingRef = useRef(false);
+
+  const scope = useMemo(
+    () => ({ agentId, flowId: flowId || undefined, nodeId: nodeId || undefined }),
+    [agentId, flowId, nodeId],
+  );
+
+  const scopeInvalid = (!!flowId || !!nodeId) && !(flowId && nodeId);
+  const chatVar = chatVariable(agent);
+  const extraVariables = useMemo(
+    () => agent?.variables.filter((variable) => variable.key !== chatVar?.key && variable.key !== "history") ?? [],
+    [agent, chatVar?.key],
+  );
+  const missingRequired = extraVariables.filter(
+    (variable) => variable.required && !(variableText[variable.key] ?? "").trim(),
+  );
 
   const loadDetail = useCallback(
     async (conversationId: string, subscribePending = true) => {
@@ -64,38 +90,54 @@ export function ChatPage() {
   );
 
   const initialize = useCallback(async () => {
+    // StrictMode 会把 effect 跑两遍；不挡住会并发 list(0) + create，凭空多出一条空会话
+    if (initializingRef.current) return;
+    initializingRef.current = true;
     setLoading(true);
     setError(null);
-    if (!flowId) {
+    if (!agentId) {
       setLoading(false);
-      setError("缺少流程 ID，无法打开对话");
+      initializingRef.current = false;
+      setError("缺少 Agent ID");
+      return;
+    }
+    if (scopeInvalid) {
+      setLoading(false);
+      initializingRef.current = false;
+      setError("flowId 与 nodeId 必须同时提供，或都不提供");
       return;
     }
     try {
-      const loadedFlow = await flowsApi.get(flowId);
-      setFlow(loadedFlow);
-      let list = await chatApi.list(flowId);
+      const loaded = await agentsApi.get(agentId);
+      setAgent(loaded);
+      const initial: Record<string, string> = {};
+      loaded.variables.forEach((variable) => {
+        initial[variable.key] = variableToText(variable);
+      });
+      setVariableText(initial);
+
+      let list = await chatApi.list({ agentId, flowId: scope.flowId, nodeId: scope.nodeId });
       if (list.length === 0) {
-        const created = await chatApi.create(flowId, loadedFlow.name);
+        const created = await chatApi.create({ agentId, flowId: scope.flowId, nodeId: scope.nodeId }, loaded.name);
         list = [created];
       }
       setConversations(list);
       await loadDetail(list[0].id);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "加载会话失败");
+      if (err instanceof ApiError) setError(`${err.message}${err.code ? `（${err.code}）` : ""}`);
+      else setError(err instanceof Error ? err.message : "加载会话失败");
     } finally {
       setLoading(false);
+      initializingRef.current = false;
     }
-  }, [flowId, loadDetail]);
+  }, [agentId, scope.flowId, scope.nodeId, scopeInvalid, loadDetail]);
 
   useEffect(() => {
     void initialize();
-    return () => {
-      setStreamRun(null);
-    };
+    return () => setStreamRun(null);
   }, [initialize]);
 
-  // 订阅当前轮的 run：token 帧就地追加到该 assistant 气泡，终态后以服务端会话为准重载
+  // 订阅当前轮的 run：token 帧就地追加，终态后以服务端会话为准重载
   useEffect(() => {
     if (!streamRun) return;
     const controller = new AbortController();
@@ -119,7 +161,7 @@ export function ChatPage() {
           ),
         );
       } catch {
-        // 重载失败就保留已经流出来的文本，下一次发消息会再对齐
+        // 重载失败保留已流出的文本，下次发消息再对齐
       }
     };
 
@@ -160,7 +202,6 @@ export function ChatPage() {
         throw err;
       },
     }).catch(() => {
-      // abort 是预期行为；非预期断流要让输入框恢复可用，别把 sending 永久卡住
       if (!finished && !disposed) {
         setSending(false);
         setStreamRun(null);
@@ -179,13 +220,23 @@ export function ChatPage() {
     if (node) node.scrollTop = node.scrollHeight;
   }, [messages, streamRun]);
 
+  const buildVariables = (): Record<string, unknown> => {
+    const values: Record<string, unknown> = {};
+    extraVariables.forEach((variable: AgentVariable) => {
+      const text = variableText[variable.key] ?? "";
+      if (text.trim() === "") return;
+      values[variable.key] = textToVariable(variable.type, text);
+    });
+    return values;
+  };
+
   const send = async () => {
     const text = input.trim();
-    if (!text || !active || sending) return;
+    if (!text || !active || sending || missingRequired.length > 0) return;
     setSending(true);
     setError(null);
     try {
-      const turn = await chatApi.sendTurn(active.id, text);
+      const turn = await chatApi.sendTurn(active.id, text, buildVariables());
       setInput("");
       const detail = await chatApi.get(active.id);
       setActive(detail);
@@ -203,19 +254,16 @@ export function ChatPage() {
       }
     } catch (err) {
       setSending(false);
-      if (err instanceof ApiError) {
-        setError(`${err.message}${err.code ? `（${err.code}）` : ""}`);
-      } else {
-        setError(err instanceof Error ? err.message : "发送失败");
-      }
+      if (err instanceof ApiError) setError(`${err.message}${err.code ? `（${err.code}）` : ""}`);
+      else setError(err instanceof Error ? err.message : "发送失败");
     }
   };
 
   const newConversation = async () => {
-    if (!flow) return;
+    if (!agent) return;
     setError(null);
     try {
-      const created = await chatApi.create(flow.id, flow.name);
+      const created = await chatApi.create(scope, agent.name);
       setConversations((prev) => [created, ...prev]);
       await loadDetail(created.id, false);
       setStreamRun(null);
@@ -229,9 +277,9 @@ export function ChatPage() {
     if (!window.confirm(`删除会话「${conversation.title}」？聊天记录会一起删掉。`)) return;
     try {
       await chatApi.remove(conversation.id);
-      const list = await chatApi.list(flowId);
+      const list = await chatApi.list(scope);
       if (list.length === 0) {
-        const created = await chatApi.create(flowId, flow?.name ?? "新对话");
+        const created = await chatApi.create(scope, agent?.name ?? "新对话");
         setConversations([created]);
         await loadDetail(created.id, false);
       } else {
@@ -246,40 +294,97 @@ export function ChatPage() {
   };
 
   if (loading) {
-    return <div className="h-full flex items-center justify-center text-[13px] text-ink-3">加载对话中…</div>;
+    return <div className="h-full flex items-center justify-center text-[13px] text-ink-3">加载 Agent 会话中…</div>;
   }
 
-  if (!flow) {
+  if (!agent) {
     return (
       <div className="h-full flex items-center justify-center">
         <div className="card p-6 text-center text-[13px]">
-          <div className="text-danger font-semibold">流程加载失败</div>
-          <div className="text-ink-3 mt-2">{error ?? "流程不存在"}</div>
-          <Link className="btn inline-flex mt-3" to="/flows">
-            返回流程列表
-          </Link>
+          <div className="text-danger font-semibold">Agent 加载失败</div>
+          <div className="text-[12px] text-ink-3 mt-2">{error ?? "Agent 不存在"}</div>
+          <Link className="btn inline-flex mt-3" to="/agents">返回 Agent 库</Link>
         </div>
       </div>
     );
   }
 
+  const backTo = flowId ? `/flows/${flowId}` : "/agents";
+
   return (
     <div className="h-full flex flex-col">
       <div className="h-[46px] flex-shrink-0 flex items-center gap-3 px-4 bg-white border-b border-line">
-        <Link className="btn !py-1" to={`/flows/${flow.id}`}>
-          <ArrowLeft size={13} className="inline mr-1 -mt-0.5" />流程
+        <Link className="btn !py-1" to={backTo}>
+          <ArrowLeft size={13} className="inline mr-1 -mt-0.5" />{flowId ? "返回流程" : "Agent 库"}
         </Link>
-        <MessagesSquare size={16} className="text-primary" />
-        <span className="text-[14px] font-semibold truncate">{flow.name}</span>
-        <span className="chip">v{flow.version}</span>
-        <span className="text-[11px] text-ink-3">每轮消息都会执行整条流程，历史自动拼进 {"{{history}}"}</span>
-        <Link className="ml-auto text-[12px] text-primary hover:underline" to={`/flows/${flow.id}`}>
-          编辑流程
-        </Link>
+        <Bot size={16} className="text-primary" />
+        <span className="text-[14px] font-semibold truncate">{agent.name}</span>
+        <span className={`chip ${flowId ? "!bg-violet-50 !text-violet" : ""}`}>
+          {flowId ? `节点作用域 ${nodeId}` : "Agent 直聊"}
+        </span>
+        <span className="text-[11px] text-ink-3">同一 Agent 在库内 / 不同流程节点各自独立历史</span>
+        <Link className="ml-auto text-[12px] text-primary hover:underline" to={`/agents/${agent.id}`}>编辑 Agent</Link>
       </div>
 
-      {error && (
-        <div className="px-4 py-2 border-b border-danger/20 bg-danger-50 text-[12px] text-danger">{error}</div>
+      {flowId && (
+        <div className="px-4 py-1.5 border-b border-violet/20 bg-violet-50 text-[11px] text-violet">
+          这里只运行这个 Agent，不执行整条流程。flowId={flowId} · nodeId={nodeId}
+        </div>
+      )}
+
+      {error && <div className="px-4 py-2 border-b border-danger/20 bg-danger-50 text-[12px] text-danger">{error}</div>}
+
+      {extraVariables.length > 0 && (
+        <div className="border-b border-line bg-white">
+          <button
+            className="w-full flex items-center gap-2 px-4 py-2 text-[12px] text-ink-2 hover:bg-slate-50"
+            onClick={() => setShowVariables((value) => !value)}
+          >
+            <Settings2 size={13} className="text-primary" />
+            变量面板（{extraVariables.length} 个，作用于下一轮消息）
+            {missingRequired.length > 0 && <span className="text-danger">缺 {missingRequired.map((item) => item.key).join("、")}</span>}
+            <span className="ml-auto">{showVariables ? "收起" : "展开"}</span>
+          </button>
+          {showVariables && (
+            <div className="px-4 pb-3 grid grid-cols-[repeat(auto-fill,minmax(220px,1fr))] gap-2">
+              {extraVariables.map((variable) => (
+                <label key={variable.key} className="block">
+                  <span className="flex items-center gap-1 text-[11px] text-ink-2 mb-0.5">
+                    <span className="font-mono">{variable.key}</span>
+                    {variable.required && <span className="text-danger">*</span>}
+                    <span className="ml-auto text-ink-3">{variable.type}</span>
+                  </span>
+                  {variable.type === "boolean" ? (
+                    <select
+                      className="field !py-1"
+                      value={variableText[variable.key] ?? ""}
+                      onChange={(event) => setVariableText((prev) => ({ ...prev, [variable.key]: event.target.value }))}
+                    >
+                      <option value="">（未填）</option>
+                      <option value="true">true</option>
+                      <option value="false">false</option>
+                    </select>
+                  ) : variable.type === "json" ? (
+                    <textarea
+                      className="field !py-1 font-mono min-h-[52px]"
+                      value={variableText[variable.key] ?? ""}
+                      placeholder="{}"
+                      onChange={(event) => setVariableText((prev) => ({ ...prev, [variable.key]: event.target.value }))}
+                    />
+                  ) : (
+                    <input
+                      className="field !py-1"
+                      type={variable.type === "number" ? "number" : "text"}
+                      value={variableText[variable.key] ?? ""}
+                      placeholder={variable.description || (variable.default !== null && variable.default !== undefined ? String(variable.default) : variable.key)}
+                      onChange={(event) => setVariableText((prev) => ({ ...prev, [variable.key]: event.target.value }))}
+                    />
+                  )}
+                </label>
+              ))}
+            </div>
+          )}
+        </div>
       )}
 
       <div className="flex-1 min-h-0 flex">
@@ -296,9 +401,7 @@ export function ChatPage() {
               <div
                 key={conversation.id}
                 className={`group rounded-sm px-2.5 py-2 cursor-pointer border ${
-                  active?.id === conversation.id
-                    ? "border-primary/40 bg-primary-soft"
-                    : "border-transparent hover:bg-slate-50"
+                  active?.id === conversation.id ? "border-primary/40 bg-primary-soft" : "border-transparent hover:bg-slate-50"
                 }`}
                 onClick={() => {
                   setError(null);
@@ -314,10 +417,7 @@ export function ChatPage() {
                   <button
                     className="text-ink-3 hover:text-danger opacity-0 group-hover:opacity-100"
                     title="删除会话"
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      void removeConversation(conversation);
-                    }}
+                    onClick={(event) => { event.stopPropagation(); void removeConversation(conversation); }}
                   >
                     <Trash2 size={12} />
                   </button>
@@ -335,10 +435,13 @@ export function ChatPage() {
             {messages.length === 0 && (
               <div className="h-full flex flex-col items-center justify-center text-center">
                 <MessagesSquare size={28} className="text-ink-3" />
-                <div className="text-[14px] font-semibold mt-2">和「{flow.name}」开始对话</div>
-                <div className="text-[12px] text-ink-3 mt-1 max-w-[420px] leading-relaxed">
-                  每发一句话都会创建一次真实 run：入口是 query，上一轮问答会作为 history 注入。
-                  运行记录仍可在「运行历史」里逐条回放。
+                <div className="text-[14px] font-semibold mt-2">和「{agent.name}」开始对话</div>
+                <div className="text-[12px] text-ink-3 mt-1 max-w-[430px] leading-relaxed">
+                  每发一句话都会创建一次 Agent run。
+                  {chatVar
+                    ? `消息会填进 Agent 的 ${chatVar.key} 变量；`
+                    : "该 Agent 没有可接收消息的字符串变量；"}
+                  {agent.variables.some((variable) => variable.key === "history") && " 历史会自动注入 history。"}
                 </div>
               </div>
             )}
@@ -367,11 +470,7 @@ export function ChatPage() {
                       <span>{STATUS_LABEL[message.status ?? ""] ?? message.status}</span>
                       {message.tokens > 0 && <span>{message.tokens} tokens</span>}
                       {message.cost > 0 && <span>¥{message.cost.toFixed(6)}</span>}
-                      {message.runId && (
-                        <Link className="hover:text-primary" to={`/runs/${message.runId}`}>
-                          回放
-                        </Link>
-                      )}
+                      {message.runId && <Link className="hover:text-primary" to={`/runs/${message.runId}`}>回放</Link>}
                     </div>
                     {message.status === "failed" && message.error && (
                       <div className="text-[11px] text-danger mt-0.5 px-1">{message.error}</div>
@@ -388,15 +487,15 @@ export function ChatPage() {
                 className="field min-h-[46px] max-h-[140px] resize-y"
                 rows={2}
                 value={input}
-                disabled={sending}
-                placeholder={sending ? "上一轮还在运行…" : "输入消息，Enter 发送 / Shift+Enter 换行"}
+                disabled={sending || !chatVar}
+                placeholder={
+                  !chatVar
+                    ? "该 Agent 没有可接收消息的字符串变量，去编辑器加一个 query"
+                    : sending ? "上一轮还在运行…" : "输入消息，Enter 发送 / Shift+Enter 换行"
+                }
                 onChange={(event) => setInput(event.target.value)}
-                onCompositionStart={() => {
-                  composingRef.current = true;
-                }}
-                onCompositionEnd={() => {
-                  composingRef.current = false;
-                }}
+                onCompositionStart={() => { composingRef.current = true; }}
+                onCompositionEnd={() => { composingRef.current = false; }}
                 onKeyDown={(event) => {
                   if (event.key === "Enter" && !event.shiftKey && !composingRef.current) {
                     event.preventDefault();
@@ -404,13 +503,14 @@ export function ChatPage() {
                   }
                 }}
               />
-              <button className="btn-primary !py-2" disabled={sending || !input.trim()} onClick={() => void send()}>
-                <Send size={14} className="inline mr-1 -mt-0.5" />
-                发送
+              <button className="btn-primary !py-2" disabled={sending || !input.trim() || !chatVar || missingRequired.length > 0} onClick={() => void send()}>
+                <Send size={14} className="inline mr-1 -mt-0.5" />发送
               </button>
             </div>
             <div className="text-[10px] text-ink-3 mt-1.5">
-              对话历史取最近 6 轮 / 3000 字（硬截断）；长短期记忆（摘要 + 向量召回）后续接入。
+              {missingRequired.length > 0
+                ? `必填变量未填：${missingRequired.map((item) => item.key).join("、")}`
+                : "对话历史取最近 6 轮 / 3000 字（硬截断）；每轮都会创建 targetType=agent 的 run。"}
             </div>
           </div>
         </section>

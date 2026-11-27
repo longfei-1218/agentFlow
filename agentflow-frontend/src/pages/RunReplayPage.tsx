@@ -103,8 +103,14 @@ export function RunReplayPage() {
         <h1 className="text-[20px] font-semibold">运行回放</h1>
         <span className="chip font-mono">{run.id}</span>
         <span className={`badge ${STATUS_BADGE[status]}`}>{STATUS_TEXT[status]}</span>
-        <button className="text-[12px] text-info hover:underline" onClick={() => navigate(`/flows/${run.flowId}`)}>
-          {run.flowId} · v{run.flowVersion}
+        <span className={`badge ${run.targetType === "flow" ? "badge-blue" : "badge-cyan"}`}>
+          {run.targetType === "flow" ? "Flow" : "Agent"}
+        </span>
+        <button
+          className="text-[12px] text-info hover:underline"
+          onClick={() => navigate(run.targetType === "flow" ? `/flows/${run.targetId}` : `/agents/${run.targetId}`)}
+        >
+          {run.targetId}{run.targetType === "flow" ? ` · v${run.flowVersion}` : ""}
         </button>
         <span className="text-[12px] text-ink-3">共 {events.length} 个事件</span>
       </div>

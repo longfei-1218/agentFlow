@@ -4,22 +4,30 @@ import { useNodeTypeStore } from "@/store/nodeTypeStore";
 import type { AgentNode } from "@/utils/flow";
 
 function text(value: unknown): string {
-  return value === undefined || value === null ? "—" : String(value);
+  return value === undefined || value === null || value === "" ? "—" : String(value);
 }
 
 function summary(type: string, config: Record<string, unknown>): string {
   switch (type) {
-    case "input": return `变量 ${text(config.name)}: ${text(config.type)}`;
-    case "prompt": return `模板 ${text(config.template)}`;
-    case "knowledge": return `top_k ${text(config.top_k)} · rerank ${config.rerank ? "开" : "关"}`;
-    case "llm": return `${text(config.model)} · ${text(config.max_tokens)} tokens`;
+    case "start": {
+      const variables = Array.isArray(config.variables) ? config.variables : [];
+      return `${variables.length} 个输入变量`;
+    }
+    case "agent": {
+      const mappings = config.inputMap && typeof config.inputMap === "object"
+        ? Object.keys(config.inputMap as Record<string, unknown>).length
+        : 0;
+      return `${text(config.agentId)} · 映射 ${mappings}`;
+    }
     case "condition": return `表达式 ${text(config.expression)}`;
-    case "tool": return `工具 ${text(config.tool_id)} · 重试 ${text(config.retry)}`;
-    case "mcp": return `${text(config.server_id)} / ${text(config.tool_name)}`;
-    case "skill": return `子流程 ${text(config.flow_id)}`;
-    case "loop": return `最大 ${text(config.max_rounds)} 轮`;
+    case "loop": return `最大 ${text(config.maxRounds)} 轮${config.exitCondition ? " · 有退出条件" : ""}`;
     case "human": return text(config.message);
-    case "output": return `映射 ${Array.isArray(config.fields) ? config.fields.join(", ") : text(config.fields)}`;
+    case "end": {
+      const outputs = config.outputs;
+      if (Array.isArray(outputs)) return outputs.length ? `输出 ${outputs.length} 项` : "自动取最后 Agent 文本";
+      if (outputs && typeof outputs === "object") return `输出 ${Object.keys(outputs).length} 个键`;
+      return "自动取最后 Agent 文本";
+    }
     default: return "";
   }
 }
@@ -44,7 +52,7 @@ export function FlowNodeView({ data, selected }: NodeProps<AgentNode>) {
         selected && "!border-primary ring-2 ring-indigo-100",
       )}
     >
-      {data.nodeType !== "input" && <Handle type="target" position={Position.Left} id="in" />}
+      {data.nodeType !== "start" && <Handle type="target" position={Position.Left} id="in" />}
 
       <div className="node-head">
         <span className="node-ico" style={{ background: definition.color }}>{definition.icon}</span>
@@ -60,17 +68,12 @@ export function FlowNodeView({ data, selected }: NodeProps<AgentNode>) {
         </>
       ) : data.nodeType === "loop" ? (
         <>
-          {/* 循环节点两个出口：body 回到循环体，done 离开循环。名称与后端的 edge sourceHandle 一致 */}
           <Handle type="source" id="body" position={Position.Right} style={{ top: "32%", background: "#3b82f6" }} />
           <Handle type="source" id="done" position={Position.Right} style={{ top: "68%", background: "#10b981" }} />
         </>
-      ) : data.nodeType !== "output" ? (
+      ) : data.nodeType !== "end" ? (
         <Handle type="source" id="out" position={Position.Right} />
       ) : null}
-
-      {data.nodeType === "knowledge" && (
-        <Handle type="source" id="context" position={Position.Top} style={{ background: "#10b981" }} />
-      )}
     </div>
   );
 }

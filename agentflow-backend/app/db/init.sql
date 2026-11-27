@@ -12,8 +12,10 @@ CREATE TABLE IF NOT EXISTS flows (
 
 CREATE TABLE IF NOT EXISTS runs (
     id TEXT PRIMARY KEY,
-    flow_id TEXT NOT NULL,
-    flow_version INTEGER NOT NULL,
+    -- v2：flow | agent；target_id 分别对应 flows.id / agents.id
+    target_type TEXT NOT NULL DEFAULT 'flow',
+    target_id TEXT NOT NULL,
+    flow_version INTEGER NOT NULL DEFAULT 1,
     status TEXT NOT NULL,
     inputs_json TEXT NOT NULL,
     outputs_json TEXT,
@@ -23,12 +25,11 @@ CREATE TABLE IF NOT EXISTS runs (
     cost REAL NOT NULL DEFAULT 0.0,
     started_at TEXT,
     finished_at TEXT,
-    -- R5.1：对话模式下这一轮的 run 属于哪个会话；普通编辑器运行留空
-    conversation_id TEXT,
-    FOREIGN KEY (flow_id) REFERENCES flows(id)
+    conversation_id TEXT
 );
 
-CREATE INDEX IF NOT EXISTS idx_runs_flow ON runs(flow_id, started_at);
+CREATE INDEX IF NOT EXISTS idx_runs_target ON runs(target_type, target_id, started_at);
+CREATE INDEX IF NOT EXISTS idx_runs_conv ON runs(conversation_id);
 
 CREATE TABLE IF NOT EXISTS run_events (
     run_id TEXT NOT NULL,
@@ -164,12 +165,16 @@ CREATE TABLE IF NOT EXISTS eval_trials (
 -- R5.1 对话模式：一个会话绑定一个流程；助手回复不单独落表，按 run_id 从 runs 还原
 CREATE TABLE IF NOT EXISTS conversations (
     id TEXT PRIMARY KEY,
-    flow_id TEXT NOT NULL,
+    agent_id TEXT NOT NULL,
+    flow_id TEXT,
+    node_id TEXT,
     title TEXT NOT NULL,
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    FOREIGN KEY (flow_id) REFERENCES flows(id) ON DELETE CASCADE
+    updated_at TEXT NOT NULL
 );
+
+CREATE INDEX IF NOT EXISTS idx_conversations_scope
+    ON conversations(agent_id, flow_id, node_id, updated_at DESC);
 
 CREATE TABLE IF NOT EXISTS chat_turns (
     id TEXT PRIMARY KEY,
@@ -177,8 +182,20 @@ CREATE TABLE IF NOT EXISTS chat_turns (
     user_content TEXT NOT NULL,
     run_id TEXT NOT NULL,
     created_at TEXT NOT NULL,
-    FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
-    FOREIGN KEY (run_id) REFERENCES runs(id)
+    FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
 );
 
 CREATE INDEX IF NOT EXISTS idx_chat_turns_conv ON chat_turns(conversation_id, created_at);
+
+-- v2：Agent 是全局资源，整份定义（变量/提示词/资源/模型/输出）存 JSON
+CREATE TABLE IF NOT EXISTS agents (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    definition_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_agents_updated ON agents(updated_at DESC);
+

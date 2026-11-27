@@ -7,7 +7,7 @@ import type { Flow, FlowCreate, NodeType, ValidationIssue } from "@/types/flow";
 import type { RuntimeState } from "@/utils/flow";
 
 const emptyFlow: Flow = {
-  id: "", name: "", version: 1, nodes: [], edges: [],
+  id: "", name: "", dslVersion: 2, version: 1, nodes: [], edges: [],
 };
 
 function nextNodeId(type: NodeType, existing: string[]): string {
@@ -132,7 +132,7 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
     const sourceNode = flow.nodes.find((n) => n.id === source);
     const targetNode = flow.nodes.find((n) => n.id === target);
     if (!sourceNode || !targetNode) return;
-    if (sourceNode.type === "output" || targetNode.type === "input") return;
+    if (sourceNode.type === "end" || targetNode.type === "start") return;
     if (sourceNode.type === "condition" && sourceHandle !== "true" && sourceHandle !== "false") return;
     if (sourceNode.type === "loop" && sourceHandle !== "body" && sourceHandle !== "done") return;
     if (flow.edges.some((e) => e.source === source && e.target === target && e.sourceHandle === sourceHandle)) return;
@@ -276,6 +276,6 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
 
   toCreatePayload: () => {
     const { flow } = get();
-    return { name: flow.name, nodes: flow.nodes, edges: flow.edges };
+    return { name: flow.name, dslVersion: 2, nodes: flow.nodes, edges: flow.edges };
   },
 }));

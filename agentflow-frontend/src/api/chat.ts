@@ -1,11 +1,19 @@
-/** 对话模式 API（R5.1）：会话 CRUD + 发一轮消息（内部创建一次普通 run）。 */
+/** Agent 对话 API：作用域 agentId + flowId? + nodeId?，每轮一次 Agent Run。 */
 import { api } from "./client";
 
 export type ChatRole = "user" | "assistant";
 
+export interface ConversationScope {
+  agentId: string;
+  flowId?: string;
+  nodeId?: string;
+}
+
 export interface Conversation {
   id: string;
-  flowId: string;
+  agentId: string;
+  flowId?: string | null;
+  nodeId?: string | null;
   title: string;
   createdAt: string;
   updatedAt: string;
@@ -35,16 +43,29 @@ export interface ChatTurnResult {
 }
 
 export const chatApi = {
-  list: (flowId?: string) =>
+  list: (scope: ConversationScope) =>
     api
-      .get<Conversation[]>("/chat/conversations", { params: flowId ? { flow_id: flowId } : undefined })
+      .get<Conversation[]>("/chat/conversations", {
+        params: {
+          agent_id: scope.agentId,
+          flow_id: scope.flowId || undefined,
+          node_id: scope.nodeId || undefined,
+        },
+      })
       .then((r) => r.data),
-  create: (flowId: string, title = "") =>
-    api.post<Conversation>("/chat/conversations", { flowId, title }).then((r) => r.data),
+  create: (scope: ConversationScope, title = "") =>
+    api
+      .post<Conversation>("/chat/conversations", {
+        agentId: scope.agentId,
+        flowId: scope.flowId || undefined,
+        nodeId: scope.nodeId || undefined,
+        title,
+      })
+      .then((r) => r.data),
   get: (id: string) => api.get<ConversationDetail>(`/chat/conversations/${id}`).then((r) => r.data),
   remove: (id: string) => api.delete(`/chat/conversations/${id}`),
-  sendTurn: (id: string, content: string) =>
+  sendTurn: (id: string, content: string, variables: Record<string, unknown> = {}) =>
     api
-      .post<ChatTurnResult>(`/chat/conversations/${id}/turns`, { content })
+      .post<ChatTurnResult>(`/chat/conversations/${id}/turns`, { content, variables })
       .then((r) => r.data),
 };
