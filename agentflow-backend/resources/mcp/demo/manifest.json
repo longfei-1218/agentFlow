@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "kind": "mcp",
+  "id": "demo-mcp",
+  "name": "demo-mcp",
+  "version": "1.0.0",
+  "description": "最小 stdio MCP Server：echo / add / now，用于验证注册、探测和调用链路",
+  "transport": "stdio",
+  "runtime": {
+    "type": "python",
+    "entrypoint": "server.py"
+  },
+  "timeoutS": 20,
+  "permissions": {
+    "network": false
+  },
+  "tools": [
+    { "name": "echo", "description": "原样返回文本" },
+    { "name": "add", "description": "两个数字相加" },
+    { "name": "now", "description": "返回当前时间" }
+  ]
+}

@@ -90,7 +90,7 @@ node node_modules\typescript\bin\tsc --noEmit
 node node_modules\vite\bin\vite.js build
 ```
 
-当前通过；Vite 仅有 607 kB chunk 体积提示。
+当前通过；Vite 仅有 614.9 kB chunk 体积提示。
 
 ## 8. 已知限制
 

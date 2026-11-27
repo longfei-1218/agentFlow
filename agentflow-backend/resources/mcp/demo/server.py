@@ -6,10 +6,10 @@
 
 用法（在 AgentFlow 的「MCP 服务」页填）：
     command = python 的绝对路径
-    args    = ["<仓库路径>/agentflow-backend/scripts/mcp_demo_server.py"]
+    args    = ["<仓库路径>/agentflow-backend/resources/mcp/demo/server.py"]
 
 也可以手工验证：
-    echo '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | python scripts/mcp_demo_server.py
+    echo '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | python resources/mcp/demo/server.py
 """
 import json
 import sys

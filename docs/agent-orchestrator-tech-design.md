@@ -181,7 +181,7 @@ Agent 库直聊：agentId
 
 ```powershell
 cd agentflow-backend
-.venv\Scripts\python.exe -m pytest          # 60 passed
+.venv\Scripts\python.exe -m pytest          # 70 passed
 cd ..\agentflow-frontend
 node node_modules\typescript\bin\tsc --noEmit
 node node_modules\vite\bin\vite.js build

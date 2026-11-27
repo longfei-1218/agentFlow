@@ -93,9 +93,9 @@ Agent 是全局资源，实时引用、没有发布或版本锁；同一个 Agen
 
 | 命令 | 结果 |
 |---|---|
-| `cd agentflow-backend; .venv\Scripts\python.exe -m pytest` | **60 passed** |
+| `cd agentflow-backend; .venv\Scripts\python.exe -m pytest` | **70 passed** |
 | `cd agentflow-frontend; node node_modules\typescript\bin\tsc --noEmit` | 0 错误 |
-| `cd agentflow-frontend; node node_modules\vite\bin\vite.js build` | 成功，仅 607 kB chunk 体积提示 |
+| `cd agentflow-frontend; node node_modules\vite\bin\vite.js build` | 成功，仅 614.9 kB chunk 体积提示 |
 
 ### 真实网关
 

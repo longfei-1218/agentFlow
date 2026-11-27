@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
-import { FlaskConical, Pencil, Plus, RefreshCw, Server, Trash2, Wrench } from "lucide-react";
+import { FlaskConical, Pencil, Plus, RefreshCw, Server, Trash2, Upload, Wrench } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { toolsApi, type ToolDef, type ToolInvocation } from "@/api/tools";
+import { ResourceImportModal } from "@/components/resources/ResourceImportModal";
 import { ToolEditorModal } from "@/components/tools/ToolEditorModal";
 import { ToolTestModal } from "@/components/tools/ToolTestModal";
 import { useToolStore } from "@/store/toolStore";
@@ -34,6 +35,7 @@ export function ToolsPage() {
 
   const [editing, setEditing] = useState<ToolDef | null>(null);
   const [editorOpen, setEditorOpen] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
   const [testing, setTesting] = useState<ToolDef | null>(null);
   const [invocations, setInvocations] = useState<ToolInvocation[]>([]);
   const [invLoading, setInvLoading] = useState(false);
@@ -72,6 +74,9 @@ export function ToolsPage() {
         <div className="ml-auto flex items-center gap-2">
           <button className="btn" onClick={() => void load(true)}>
             <RefreshCw size={13} className="inline mr-1 -mt-0.5" />刷新
+          </button>
+          <button className="btn" onClick={() => setImportOpen(true)}>
+            <Upload size={13} className="inline mr-1 -mt-0.5" />导入 HTTP 工具
           </button>
           <button
             className="btn-primary"
@@ -241,6 +246,16 @@ export function ToolsPage() {
             setEditorOpen(false);
             setEditing(null);
             void loadInvocations(filterTool);
+          }}
+        />
+      )}
+      {importOpen && (
+        <ResourceImportModal
+          defaultKind="http_tool"
+          allowedKinds={["http_tool"]}
+          onClose={() => setImportOpen(false)}
+          onImported={() => {
+            void load(true);
           }}
         />
       )}

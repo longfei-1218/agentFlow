@@ -11,7 +11,7 @@
 ```powershell
 cd agentflow-backend
 .venv\Scripts\python.exe -m pytest
-# 期望 60 passed
+# 期望 70 passed
 
 cd ..\agentflow-frontend
 node node_modules\typescript\bin\tsc --noEmit
@@ -53,6 +53,31 @@ cd agentflow-backend
 - 文档已收成 v2 口径；历史段落已删除。
 - 前端构建产物已重新生成。
 
+### E. 工具 / MCP 扩展（2026-11-27 已执行）
+
+| # | 入口 | 检查 | 结果 |
+|---|---|---|---|
+| 1 | 接口：`GET /api/tools/builtins` | 返回 `echo / now / calc / render_interview_repo / render_interview_report`，后两者 Schema 相同 | 通过 |
+| 2 | 接口：注册 `render_interview_repo` | `tool_20261127_0845404cca`，`kind=builtin` | 通过 |
+| 3 | 接口：试跑面试报告 | `ok=true`，落盘 `interview_report_20261127_164601_1dd6de.html`（6584 bytes），`downloadUrl` 可下载 | 通过 |
+| 4 | 接口：注册 `parse-document` MCP | `mcp_20261127_084540c725`，stdio，env 含 `AGENTFLOW_DOC_ROOTS` | 通过 |
+| 5 | 接口：探测 `parse-document` | `ok=true`，495 ms，工具清单为 `parse_document` | 通过 |
+| 6 | 接口：解析 README | `ok=true`，3969 chars，超过 `maxChars=1200` 时 `truncated=true` | 通过 |
+| 7 | 接口：产物下载 | `GET /api/artifacts/{fileName}` 返回 200，`text/html; charset=utf-8`，包含报告标题 | 通过 |
+
+### F. 资源包解耦与外部导入（2026-11-27 已执行）
+
+| # | 入口 | 检查 | 结果 |
+|---|---|---|---|
+| 1 | 目录：`resources/builtin_tools/render_interview_repo/` | `manifest.json + tool.py`，Catalog 动态加载，主程序不再硬编码 renderer | 通过 |
+| 2 | 目录：`resources/mcp/{demo,parse_document}/` | MCP server + manifest 已从 `scripts/` 迁入资源包，旧脚本已删除 | 通过 |
+| 3 | 接口：导入本地 MCP zip | `mcp_20261127_1215113720`，安装到 `data/resources/users/local/mcp/parse-document-import-20261127-b6debcb8`，探测到 `parse_document`（验证后已清理） | 通过 |
+| 4 | 接口：调用导入的 MCP | 解析安装包内 `manifest.json`，999 chars，`truncated=false`，527 ms | 通过 |
+| 5 | 接口：导入 HTTP 工具 manifest | `tool_20261127_1215235ac7`，`source=import`，`paramsSchema.required=["orderId"]`（验证后已清理） | 通过 |
+| 6 | 接口：`GET /api/resources` | 返回 `ownerId=local`、Catalog 内置工具、工具、MCP、知识库总览 | 通过 |
+| 7 | 前端：工具页 / MCP 页 | 新增「导入 HTTP 工具」「导入 MCP」入口；工具页实际导入 `lookup_order`，MCP 页显示本地包 / 远程两个页签 | 通过 |
+| 8 | 自动化 | 资源导入 / 远程 HTTP MCP / 知识库文件落盘 4 条新测试，合计 70 passed | 通过 |
+
 ## 步骤 4 验收（前端一次性切换，已完成）
 
 - 路由：`/agents`、`/agents/:id`、`/agents/:id/chat`；删除旧 `/flows/:id/chat`。
@@ -93,7 +118,7 @@ cd agentflow-backend
 ## 已知限制
 
 - `inputMap` 只校验路径可解析，不限制只能引用直接上游。
-- Agent 资源逐条添加，MCP 工具靠探测勾选，没有批量导入。
+- Agent 资源逐条添加；MCP / HTTP 工具已支持外部导入，内置工具仍只允许随代码发布。
 - 运行历史不支持名称搜索。
 - 实时引用无版本锁；编辑 Agent 立即影响引用流程。
 - 旧 DSL 只读回放，不支持编辑、发布、校验、运行。

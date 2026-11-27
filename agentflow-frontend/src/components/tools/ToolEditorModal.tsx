@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { Save, X } from "lucide-react";
-import type { BuiltinInfo, ToolDef, ToolPayload } from "@/api/tools";
+import type { BuiltinInfo, BuiltinName, ToolDef, ToolPayload } from "@/api/tools";
 import { useToolStore } from "@/store/toolStore";
 
 const EMPTY_SCHEMA = { type: "object", properties: {} };
@@ -25,10 +25,11 @@ export function ToolEditorModal({ tool, builtins, onClose }: Props) {
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [kind, setKind] = useState<"http" | "builtin">("builtin");
-  const [builtin, setBuiltin] = useState<"echo" | "now" | "calc">("echo");
+  const [builtin, setBuiltin] = useState<BuiltinName>("echo");
   const [method, setMethod] = useState("GET");
   const [url, setUrl] = useState("");
   const [headersText, setHeadersText] = useState("{}");
+  const [envText, setEnvText] = useState("{}");
   const [bodyText, setBodyText] = useState("");
   const [schemaText, setSchemaText] = useState(JSON.stringify(EMPTY_SCHEMA, null, 2));
   const [timeoutMs, setTimeoutMs] = useState(5000);
@@ -45,10 +46,11 @@ export function ToolEditorModal({ tool, builtins, onClose }: Props) {
     setName(tool?.name ?? "");
     setDescription(tool?.description ?? "");
     setKind(tool?.kind ?? "builtin");
-    setBuiltin((tool?.builtin as "echo" | "now" | "calc") ?? "echo");
+    setBuiltin(tool?.builtin ?? "echo");
     setMethod(tool?.method ?? "GET");
     setUrl(tool?.url ?? "");
     setHeadersText(JSON.stringify(tool?.headers ?? {}, null, 2));
+    setEnvText(JSON.stringify(tool?.env ?? {}, null, 2));
     setBodyText(tool?.bodyTemplate ?? "");
     setSchemaText(JSON.stringify(tool?.paramsSchema ?? EMPTY_SCHEMA, null, 2));
     setTimeoutMs(tool?.timeoutMs ?? 5000);
@@ -81,6 +83,11 @@ export function ToolEditorModal({ tool, builtins, onClose }: Props) {
       setError(headers.message);
       return;
     }
+    const env = safeJson(envText, {});
+    if (!env.ok) {
+      setError(env.message);
+      return;
+    }
     const schema = safeJson(schemaText, EMPTY_SCHEMA);
     if (!schema.ok) {
       setError(schema.message);
@@ -95,6 +102,7 @@ export function ToolEditorModal({ tool, builtins, onClose }: Props) {
       method: kind === "builtin" ? "POST" : method.toUpperCase(),
       url: kind === "builtin" ? "" : url.trim(),
       headers: headers.value as Record<string, string>,
+      env: env.value as Record<string, string>,
       bodyTemplate: bodyText.trim() ? bodyText : null,
       paramsSchema: (kind === "builtin" && builtinInfo ? builtinInfo.paramsSchema : schema.value) as Record<string, unknown>,
       timeoutMs,
@@ -160,7 +168,7 @@ export function ToolEditorModal({ tool, builtins, onClose }: Props) {
             <div className="mt-3">
               <label className="block">
                 <span className="block mb-1 text-[12px] text-ink-2">内置实现</span>
-                <select className="field" value={builtin} onChange={(e) => setBuiltin(e.target.value as "echo" | "now" | "calc")}>
+                <select className="field" value={builtin} onChange={(e) => setBuiltin(e.target.value as BuiltinName)}>
                   {builtins.map((item) => (
                     <option key={item.name} value={item.name}>{item.name} — {item.description}</option>
                   ))}
@@ -197,6 +205,22 @@ export function ToolEditorModal({ tool, builtins, onClose }: Props) {
               </label>
             </div>
           )}
+
+          <label className="block mt-3">
+            <span className="block mb-1 text-[12px] text-ink-2">
+              环境变量（JSON）
+              <span className="ml-1 text-ink-3">· 值支持 {"${OS_VAR}"}，从后端进程环境解析</span>
+            </span>
+            <textarea
+              className="field min-h-[64px] font-mono text-[12px]"
+              value={envText}
+              placeholder={'{"API_TOKEN": "${MY_TOKEN}"}'}
+              onChange={(e) => setEnvText(e.target.value)}
+            />
+            <div className="mt-1 text-[11px] text-ink-3">
+              URL / Headers / Body 里可以写 {"${API_TOKEN}"}；缺失变量会在试跑时直接报 TOOL_ENV_MISSING，不会把占位符发给上游。
+            </div>
+          </label>
 
           {kind === "http" && (
             <label className="block mt-3">

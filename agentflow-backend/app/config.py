@@ -6,6 +6,11 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     DATABASE_PATH: str = "./data/agentflow.db"
+    # 内置工具落盘的产物目录；render_interview_repo 生成的 HTML 报告放这里
+    ARTIFACT_DIR: str = "./data/artifacts"
+    # 外部上传资源目录：staging 与 users/<owner>/{mcp,http_tools,knowledge}
+    RESOURCE_DATA_DIR: str = "./data/resources"
+    RESOURCE_OWNER_ID: str = "local"
 
     # LLM（B2 起真正调用；也可通过 /api/settings/llm 在运行时覆盖）
     LLM_BASE_URL: str = "https://api.openai.com/v1"

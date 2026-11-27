@@ -9,6 +9,7 @@ from app.models.tool import (
     ToolInvocation,
     ToolTestRequest,
 )
+from app.resources import catalog
 from app.services import tool_repo, tool_runner
 from app.services.event_bus import utc_now
 
@@ -32,7 +33,7 @@ async def list_builtins():
     return [
         {**item, "paramsSchema": BUILTIN_SCHEMAS[item["name"]]}
         for item in BUILTINS
-    ]
+    ] + catalog.list_builtins()
 
 
 @router.get("/invocations", response_model=list[ToolInvocation])

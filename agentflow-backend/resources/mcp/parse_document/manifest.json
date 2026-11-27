@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 1,
+  "kind": "mcp",
+  "id": "parse_document",
+  "name": "parse-document",
+  "version": "1.0.0",
+  "description": "把简历 / JD / 面试材料解析成纯文本的 stdio MCP Server",
+  "transport": "stdio",
+  "runtime": {
+    "type": "python",
+    "entrypoint": "server.py"
+  },
+  "timeoutS": 20,
+  "envSchema": [
+    {
+      "key": "AGENTFLOW_DOC_ROOTS",
+      "required": true,
+      "secret": false,
+      "description": "允许读取的根目录，多个用系统路径分隔符"
+    },
+    {
+      "key": "AGENTFLOW_DOC_MAX_BYTES",
+      "required": false,
+      "secret": false,
+      "default": "20971520",
+      "description": "单文件大小上限"
+    },
+    {
+      "key": "AGENTFLOW_DOC_MAX_CHARS",
+      "required": false,
+      "secret": false,
+      "default": "50000",
+      "description": "返回文本最大字符数"
+    }
+  ],
+  "permissions": {
+    "fsRead": ["${AGENTFLOW_DOC_ROOTS}"],
+    "network": false
+  },
+  "tools": [
+    {
+      "name": "parse_document",
+      "description": "解析本地文档为纯文本"
+    }
+  ]
+}

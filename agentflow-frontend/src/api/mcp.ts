@@ -4,13 +4,19 @@ import { api } from "./client";
 export interface MCPServer {
   id: string;
   name: string;
-  transport: "stdio";
+  transport: "stdio" | "http";
   command: string;
   args: string[];
+  url?: string;
+  headers?: Record<string, string>;
   env: Record<string, string>;
   cwd?: string | null;
   timeoutS: number;
   enabled: boolean;
+  packagePath?: string | null;
+  source?: "registry" | "resource_package" | "import";
+  status?: "installed" | "verified" | "staged" | "rejected";
+  verifiedAt?: string | null;
   createdAt?: string | null;
   updatedAt?: string | null;
 }

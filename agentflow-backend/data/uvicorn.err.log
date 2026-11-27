@@ -1,6 +1,4 @@
-INFO:     Started server process [35004]
+INFO:     Started server process [18396]
 INFO:     Waiting for application startup.
 INFO:     Application startup complete.
 INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
-E:\workplace\workplaceReactNative\agentFlow\agentflow-backend\.venv\lib\site-packages\langgraph\checkpoint\base\__init__.py:18: LangChainPendingDeprecationWarning: The default value of `allowed_objects` will change in a future version. Pass an explicit value (e.g., allowed_objects='messages' or allowed_objects='core') to suppress this warning.
-  from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer

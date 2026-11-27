@@ -16,6 +16,7 @@ async def client(tmp_path, monkeypatch):
 
     await db.close()
     monkeypatch.setattr(settings, "DATABASE_PATH", str(tmp_path / "agentflow.db"))
+    monkeypatch.setattr(settings, "RESOURCE_DATA_DIR", str(tmp_path / "resources"))
     await db.connect()
     event_bus._seq.clear()
     _reset_sse_status()

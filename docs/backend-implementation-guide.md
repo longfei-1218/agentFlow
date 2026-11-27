@@ -113,7 +113,7 @@ app/
 
 ```powershell
 cd agentflow-backend
-.venv\Scripts\python.exe -m pytest          # 60 passed
+.venv\Scripts\python.exe -m pytest          # 70 passed
 .venv\Scripts\python.exe scripts\seed_v2_demo.py --smoke
 ```
 

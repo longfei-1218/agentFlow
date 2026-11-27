@@ -14,6 +14,7 @@ from app.models.knowledge import (
     KnowledgeBaseCreate,
     KBSearchResult,
 )
+from app.resources import knowledge_store
 from app.services import knowledge_rag
 from app.services.event_bus import utc_now
 
@@ -47,7 +48,14 @@ def _row_to_kb(row) -> KnowledgeBase:
 
 async def list_kbs() -> list[KnowledgeBase]:
     rows = await db.fetchall("SELECT * FROM knowledge_bases ORDER BY created_at, name")
-    return [_row_to_kb(row) for row in rows]
+    items = [_row_to_kb(row) for row in rows]
+    # 老库第一次被列出时补一份资源目录 manifest，之后文档就有了可读的源文件
+    for kb in items:
+        try:
+            knowledge_store.ensure_kb(kb)
+        except OSError:
+            pass
+    return items
 
 
 async def get_kb(kb_id: str) -> KnowledgeBase:
@@ -89,6 +97,10 @@ async def create_kb(payload: KnowledgeBaseCreate) -> KnowledgeBase:
             now,
         ),
     )
+    try:
+        knowledge_store.ensure_kb(kb)
+    except OSError:
+        pass
     return kb
 
 
@@ -115,6 +127,7 @@ async def delete_kb(kb_id: str) -> None:
             raise KBNotFound(f"知识库不存在: {kb_id}")
         await conn.execute("DELETE FROM kb_chunks WHERE kb_id = ?", (kb_id,))
         await conn.execute("DELETE FROM kb_documents WHERE kb_id = ?", (kb_id,))
+    knowledge_store.delete_kb(kb_id)
 
 
 async def _refresh_counts(conn, kb_id: str) -> None:
@@ -144,6 +157,19 @@ async def add_document(kb_id: str, payload: KBDocumentCreate) -> KBDocument:
     if not chunks:
         raise ValueError("文档内容为空，无法切块")
 
+    doc = KBDocument(
+        id=doc_id,
+        kb_id=kb_id,
+        title=title,
+        content=payload.content,
+        chunk_count=len(chunks),
+        created_at=now,
+    )
+    try:
+        knowledge_store.save_document(doc)
+    except OSError as exc:
+        raise ValueError(f"文档落盘失败: {exc}") from exc
+
     async with db.transaction() as conn:
         await conn.execute(
             "INSERT INTO kb_documents (id, kb_id, title, content, chunk_count, created_at) "
@@ -159,14 +185,7 @@ async def add_document(kb_id: str, payload: KBDocumentCreate) -> KBDocument:
         )
         await _refresh_counts(conn, kb_id)
 
-    return KBDocument(
-        id=doc_id,
-        kb_id=kb_id,
-        title=title,
-        content=payload.content,
-        chunk_count=len(chunks),
-        created_at=now,
-    )
+    return doc
 
 
 async def list_documents(kb_id: str) -> list[KBDocument]:
@@ -176,7 +195,7 @@ async def list_documents(kb_id: str) -> list[KBDocument]:
         "WHERE kb_id = ? ORDER BY created_at",
         (kb_id,),
     )
-    return [
+    docs = [
         KBDocument(
             id=row["id"],
             kb_id=row["kb_id"],
@@ -187,6 +206,13 @@ async def list_documents(kb_id: str) -> list[KBDocument]:
         )
         for row in rows
     ]
+    # 老库第一次打开时把已有文档补成 md 源文件；SQLite 仍是检索索引。
+    for doc in docs:
+        try:
+            knowledge_store.ensure_document(doc)
+        except OSError:
+            pass
+    return docs
 
 
 async def delete_document(kb_id: str, doc_id: str) -> None:
@@ -202,6 +228,7 @@ async def delete_document(kb_id: str, doc_id: str) -> None:
         if deleted == 0:
             raise KBDocumentNotFound(f"文档不存在: {doc_id}")
         await _refresh_counts(conn, kb_id)
+    knowledge_store.delete_document(kb_id, doc_id)
 
 
 async def search(kb_id: str, query: str, top_k: int = 4, rerank: bool = False) -> KBSearchResult:

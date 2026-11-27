@@ -1,0 +1,9 @@
+# 运行期生成的面试报告等产物
+agentflow-backend/data/artifacts/
+
+# 用户导入的 MCP / 工具包和知识库文件
+agentflow-backend/data/resources/
+
+# 本地后端日志
+agentflow-backend/backend.log
+agentflow-backend/backend.err.log

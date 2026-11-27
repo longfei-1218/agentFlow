@@ -1,0 +1,72 @@
+{
+  "schemaVersion": 1,
+  "kind": "builtin_tool",
+  "id": "render_interview_repo",
+  "name": "render_interview_repo",
+  "version": "1.0.0",
+  "description": "把结构化面试结果渲染成固定模板 HTML 并落盘，返回下载路径",
+  "aliases": ["render_interview_report"],
+  "runtime": {
+    "type": "python",
+    "entrypoint": "tool.py",
+    "callable": "run"
+  },
+  "permissions": {
+    "fsWrite": ["${ARTIFACT_DIR}"],
+    "network": false
+  },
+  "paramsSchema": {
+    "type": "object",
+    "properties": {
+      "title": {"type": "string", "description": "报告标题，默认「面试评估报告」"},
+      "candidate": {"type": "string", "description": "候选人姓名或标识"},
+      "position": {"type": "string", "description": "应聘岗位"},
+      "interviewer": {"type": "string", "description": "面试官"},
+      "date": {"type": "string", "description": "面试日期，如 2026-11-27"},
+      "verdict": {"type": "string", "description": "结论标签，如「建议进入下一轮」「待定」「不通过」"},
+      "overall_score": {"type": "number", "description": "总分 0-100；不传则取各维度平均分"},
+      "summary": {"type": "string", "description": "总体评价（纯文本，渲染时自动转义）"},
+      "dimensions": {
+        "type": "array",
+        "description": "能力维度评分",
+        "items": {
+          "type": "object",
+          "properties": {
+            "name": {"type": "string", "description": "维度名，如「技术深度」"},
+            "score": {"type": "number", "description": "0-100"},
+            "comment": {"type": "string", "description": "该维度评语"}
+          },
+          "required": ["name"]
+        }
+      },
+      "strengths": {"type": "array", "items": {"type": "string"}, "description": "亮点 / 优势"},
+      "risks": {"type": "array", "items": {"type": "string"}, "description": "风险 / 待确认项"},
+      "qa": {
+        "type": "array",
+        "description": "关键问答记录",
+        "items": {
+          "type": "object",
+          "properties": {
+            "question": {"type": "string"},
+            "answer": {"type": "string"},
+            "comment": {"type": "string", "description": "追问或评价"}
+          },
+          "required": ["question"]
+        }
+      },
+      "transcript": {
+        "type": "array",
+        "description": "完整对话记录（可选）",
+        "items": {
+          "type": "object",
+          "properties": {
+            "role": {"type": "string", "description": "interviewer / candidate / system"},
+            "content": {"type": "string"}
+          },
+          "required": ["role", "content"]
+        }
+      },
+      "output_name": {"type": "string", "description": "文件名前缀（可选，只保留字母数字下划线）"}
+    }
+  }
+}

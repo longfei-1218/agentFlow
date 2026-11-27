@@ -4,7 +4,7 @@ import { api } from "./client";
 export type ToolKind = "http" | "builtin";
 export type ToolRisk = "low" | "medium" | "high";
 export type IdemMode = "none" | "key";
-export type BuiltinName = "echo" | "now" | "calc";
+export type BuiltinName = string;
 
 export interface ToolDef {
   id: string;
@@ -15,6 +15,7 @@ export interface ToolDef {
   method: string;
   url: string;
   headers: Record<string, string>;
+  env: Record<string, string>;
   bodyTemplate?: string | null;
   paramsSchema: Record<string, unknown>;
   timeoutMs: number;
@@ -24,6 +25,9 @@ export interface ToolDef {
   idempotencyTtlS: number;
   risk: ToolRisk;
   enabled: boolean;
+  packagePath?: string | null;
+  source?: "registry" | "builtin_resource" | "import";
+  verifiedAt?: string | null;
   createdAt?: string | null;
   updatedAt?: string | null;
 }

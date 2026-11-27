@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
-import { Play, Plus, RefreshCw, Server, Trash2, Wand2 } from "lucide-react";
+import { Play, Plus, RefreshCw, Server, Trash2, Upload, Wand2 } from "lucide-react";
 import { mcpApi, type MCPCallResult, type MCPServer, type MCPToolInfo } from "@/api/mcp";
+import { ResourceImportModal } from "@/components/resources/ResourceImportModal";
 import { useMcpStore } from "@/store/mcpStore";
 
 interface Draft {
@@ -8,13 +9,21 @@ interface Draft {
   name: string;
   command: string;
   argsText: string;
-  env: Record<string, string>;
+  envText: string;
   cwd: string | null;
   timeoutS: number;
   enabled: boolean;
 }
 
-const EMPTY: Draft = { name: "", command: "python", argsText: "[]", env: {}, cwd: null, timeoutS: 15, enabled: true };
+const EMPTY: Draft = {
+  name: "",
+  command: "python",
+  argsText: "[]",
+  envText: "{}",
+  cwd: null,
+  timeoutS: 15,
+  enabled: true,
+};
 
 function sampleFromSchema(schema: Record<string, unknown>): Record<string, unknown> {
   const properties = (schema?.properties ?? {}) as Record<
@@ -42,6 +51,7 @@ export function McpPage() {
   const [selectedId, setSelectedId] = useState<string>("");
   const [draft, setDraft] = useState<Draft>(EMPTY);
   const [editing, setEditing] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
 
@@ -113,7 +123,7 @@ export function McpPage() {
       name: server.name,
       command: server.command,
       argsText: JSON.stringify(server.args ?? [], null, 2),
-      env: server.env ?? {},
+      envText: JSON.stringify(server.env ?? {}, null, 2),
       cwd: server.cwd ?? null,
       timeoutS: server.timeoutS,
       enabled: server.enabled,
@@ -135,6 +145,19 @@ export function McpPage() {
       setFormError("名称与启动命令必填");
       return;
     }
+    let env: Record<string, string>;
+    try {
+      const parsed = JSON.parse(draft.envText.trim() || "{}");
+      if (!parsed || Array.isArray(parsed) || typeof parsed !== "object") {
+        throw new Error("env 必须是 JSON 对象");
+      }
+      env = Object.fromEntries(
+        Object.entries(parsed).map(([key, value]) => [key, String(value ?? "")]),
+      );
+    } catch (error) {
+      setFormError(`env 不是合法 JSON 对象：${(error as Error).message}`);
+      return;
+    }
     setBusy(true);
     try {
       const payload = {
@@ -142,7 +165,7 @@ export function McpPage() {
         transport: "stdio" as const,
         command: draft.command.trim(),
         args,
-        env: draft.env,
+        env,
         cwd: draft.cwd,
         timeoutS: draft.timeoutS,
         enabled: draft.enabled,
@@ -217,6 +240,9 @@ export function McpPage() {
           <button className="btn" onClick={() => void load(true)}>
             <RefreshCw size={13} className="inline mr-1 -mt-0.5" />刷新
           </button>
+          <button className="btn" onClick={() => setImportOpen(true)}>
+            <Upload size={13} className="inline mr-1 -mt-0.5" />导入 MCP
+          </button>
           <button className="btn-primary" onClick={startCreate}>
             <Plus size={13} className="inline mr-1 -mt-0.5" />注册 Server
           </button>
@@ -242,7 +268,7 @@ export function McpPage() {
             <div className="py-12 text-center text-[12px] text-ink-3 leading-relaxed">
               还没有 Server。<br />
               可以先用仓库自带的演示 server：<br />
-              <span className="font-mono text-[11px]">scripts/mcp_demo_server.py</span>
+              <span className="font-mono text-[11px]">resources/mcp/demo/server.py</span>
             </div>
           ) : (
             <table className="w-full text-[12px]">
@@ -262,7 +288,9 @@ export function McpPage() {
                   >
                     <td className="px-3 py-2 font-mono">{server.name}</td>
                     <td className="px-3 py-2 font-mono text-[11px] text-ink-2 break-all max-w-[220px]">
-                      {server.command} {(server.args ?? []).join(" ")}
+                      {server.transport === "http"
+                        ? server.url ?? "—"
+                        : `${server.command} ${(server.args ?? []).join(" ")}`}
                     </td>
                     <td className="px-3 py-2 whitespace-nowrap">{server.timeoutS}s</td>
                     <td className="px-3 py-2">
@@ -316,7 +344,21 @@ export function McpPage() {
                   className="field min-h-[72px] font-mono"
                   value={draft.argsText}
                   onChange={(e) => setDraft({ ...draft, argsText: e.target.value })}
-                  placeholder='["scripts/mcp_demo_server.py"]'
+                  placeholder='["resources/mcp/demo/server.py"]'
+                />
+              </label>
+              <label className="block">
+                <span className="block mb-1 text-[12px] text-ink-2">
+                  env
+                  <span className="ml-1 text-ink-3">
+                    · JSON 对象；值支持 {"${OS_VAR}"}，从后端进程环境解析
+                  </span>
+                </span>
+                <textarea
+                  className="field min-h-[72px] font-mono"
+                  value={draft.envText}
+                  onChange={(e) => setDraft({ ...draft, envText: e.target.value })}
+                  placeholder={'{"AGENTFLOW_DOC_ROOTS": "${DOC_ROOTS}"}'}
                 />
               </label>
               <div className="flex items-center gap-3">
@@ -348,19 +390,22 @@ export function McpPage() {
               </div>
               <div className="text-[11px] text-ink-3 leading-relaxed">
                 只支持 stdio：命令由本机执行，请确认来源可信。args 里的相对路径按「后端进程的工作目录」解析。
+                env 里写 {"${SECRET}"} 时不会把明文落在页面里，实际值从后端进程环境变量读取。
               </div>
             </>
           ) : selected ? (
             <>
               <div className="flex items-center gap-2">
                 <span className="font-semibold text-[13px]">{selected.name}</span>
-                <span className="badge badge-blue">stdio</span>
+                <span className="badge badge-blue">{selected.transport}</span>
                 <button className="ml-auto text-[11px] text-ink-3 hover:text-primary" onClick={() => void probe(selected)}>
                   <Wand2 size={12} className="inline mr-1" />重新探测
                 </button>
               </div>
               <div className="font-mono text-[11px] text-ink-3 break-all">
-                {selected.command} {(selected.args ?? []).join(" ")}
+                {selected.transport === "http"
+                  ? selected.url ?? "—"
+                  : `${selected.command} ${(selected.args ?? []).join(" ")}`}
               </div>
 
               {probeError && (
@@ -436,6 +481,17 @@ export function McpPage() {
           )}
         </section>
       </div>
+
+      {importOpen && (
+        <ResourceImportModal
+          defaultKind="mcp_local"
+          allowedKinds={["mcp_local", "mcp_remote"]}
+          onClose={() => setImportOpen(false)}
+          onImported={() => {
+            void load(true);
+          }}
+        />
+      )}
     </div>
   );
 }

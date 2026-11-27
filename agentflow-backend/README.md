@@ -1,6 +1,6 @@
 # AgentFlow Studio · 后端
 
-FastAPI + aiosqlite + sse-starlette + httpx + LangGraph。当前是 **Flow v2**：全局 Agent 库 + 六类编排节点 + Agent 作用域对话；步骤 5 已收尾，后端 60 条测试通过。
+FastAPI + aiosqlite + sse-starlette + httpx + LangGraph。当前是 **Flow v2**：全局 Agent 库 + 六类编排节点 + Agent 作用域对话；步骤 5 已收尾，后端 70 条测试通过。
 
 ## 已实现
 
@@ -31,6 +31,13 @@ FastAPI + aiosqlite + sse-starlette + httpx + LangGraph。当前是 **Flow v2**�
 ### 资源库与运行
 
 - 工具、MCP、知识库仍作为独立资源库：`/api/tools`、`/api/mcp-servers`、`/api/knowledge`；Agent 通过 `resources[]` 引用。
+- **工具环境变量**：`ToolDef.env` + URL / Headers / Body 里的 `${VAR}`，运行时合并进程环境、`.env` 与资源 `env`；缺失报 `TOOL_ENV_MISSING`。
+- **MCP 环境变量**：`MCPServerDef.env` 以及 command / args / cwd 里的 `${VAR}`，启动子进程前展开；缺失报 `MCP_ENV_MISSING`。
+- **内置工具**：核心 `echo / now / calc` + 资源包 Catalog 扫描 `resources/builtin_tools/*`。`render_interview_repo` 在 `resources/builtin_tools/render_interview_repo/tool.py`，用固定模板把结构化面试结果渲染成 HTML，写入 `ARTIFACT_DIR`（默认 `./data/artifacts`），返回 `path` + `downloadUrl`。
+- **产物下载**：`GET /api/artifacts`、`GET /api/artifacts/{fileName}`。
+- **parse_document MCP**：`resources/mcp/parse_document/server.py`，支持 txt/md/csv/json/html/docx/pdf；根目录由 `AGENTFLOW_DOC_ROOTS` 控制，PDF 依赖 `pypdf`。
+- **资源导入**：`GET /api/resources`、`POST /api/resources/import`，支持本地 MCP zip、远程 HTTP MCP、HTTP 工具；外部只允许 MCP + HTTP 工具，不允许上传内置 Python 工具。运行时资源落 `data/resources/users/<owner>/`。
+- 新增工具 / MCP 的完整步骤见 `docs/tool-mcp-extension-guide.md`，资源包与导入架构见 `docs/resource-package-architecture.md`。
 - `seed_v2_demo.py` 写入两个演示 Agent 与两条演示流程，`--smoke` 跑真实 DeepSeek 冒烟。
 
 ## 本地启动
@@ -50,12 +57,14 @@ cd agentflow-backend
 .venv\Scripts\python.exe -m pytest
 ```
 
-期望 **60 passed**，覆盖：
+期望 **70 passed**，覆盖：
 
 - Flow v2 默认 start/end、六类节点 Schema、结构校验、condition 分支、loop、human 暂停/批准/取消、旧 DSL `FLOW_DSL_LEGACY`；
 - Agent CRUD、零变量 Agent 保存与对话、变量渲染、`@tool` 强制、输出 Schema 重试、空回答、Agent 异步 run + SSE；
 - 两个 Agent 经 `inputMap` 串联、必填变量未映射、Agent 作用域对话与历史隔离；
-- Run 生命周期、取消、序号恢复、工具/MCP/知识库/设置。
+- Run 生命周期、取消、序号恢复、工具/MCP/知识库/设置；
+- 工具 / MCP 的 `${VAR}` 展开与缺失报错、`.env` 合并、面试报告 HTML 落盘与下载、`parse_document` 路径边界；
+- 资源包 Catalog、本地 MCP zip 导入 + 探测、远程 HTTP MCP 导入 + 调用、HTTP 工具 manifest 导入、知识库文档落盘。
 
 真实冒烟：
 

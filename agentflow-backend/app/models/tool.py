@@ -15,9 +15,10 @@ from app.models.flow import CamelModel
 ToolKind = Literal["http", "builtin"]
 Risk = Literal["low", "medium", "high"]
 IdemMode = Literal["none", "key"]
-BuiltinName = Literal["echo", "now", "calc"]
+# 内置工具名称由 resources/builtin_tools/*/manifest.json 决定，不能再写死 Literal
+BuiltinName = str
 
-# 内置工器的默认参数 Schema：没有网络也能把「真执行」这条路走通
+# 内置工具的默认参数 Schema：没有网络也能把「真执行」这条路走通
 BUILTIN_SCHEMAS: dict[str, dict[str, Any]] = {
     "echo": {
         "type": "object",
@@ -45,6 +46,8 @@ class ToolDef(CamelModel):
     method: str = "GET"
     url: str = ""
     headers: dict[str, str] = Field(default_factory=dict)
+    # 资源级环境变量：值可以写 `${OS_VAR}`，模板里也能用 `${KEY}` 引用这里定义的常量
+    env: dict[str, str] = Field(default_factory=dict)
     body_template: str | None = None
     params_schema: dict[str, Any] = Field(
         default_factory=lambda: {"type": "object", "properties": {}}
@@ -56,6 +59,10 @@ class ToolDef(CamelModel):
     idempotency_ttl_s: int = Field(default=600, ge=0, le=86400)
     risk: Risk = "low"
     enabled: bool = True
+    # 资源包元数据：内置工具指向 resources/...；导入的 HTTP 工具通常为空
+    package_path: str | None = None
+    source: Literal["registry", "builtin_resource", "import"] = "registry"
+    verified_at: str | None = None
     created_at: str | None = None
     updated_at: str | None = None
 
@@ -70,6 +77,8 @@ class ToolCreate(CamelModel):
     method: str = "GET"
     url: str = ""
     headers: dict[str, str] = Field(default_factory=dict)
+    # 资源级环境变量：值可以写 `${OS_VAR}`，模板里也能用 `${KEY}` 引用这里定义的常量
+    env: dict[str, str] = Field(default_factory=dict)
     body_template: str | None = None
     params_schema: dict[str, Any] = Field(
         default_factory=lambda: {"type": "object", "properties": {}}
@@ -81,6 +90,9 @@ class ToolCreate(CamelModel):
     idempotency_ttl_s: int = Field(default=600, ge=0, le=86400)
     risk: Risk = "low"
     enabled: bool = True
+    package_path: str | None = None
+    source: Literal["registry", "builtin_resource", "import"] = "registry"
+    verified_at: str | None = None
 
 
 class ToolInvocation(CamelModel):
@@ -106,3 +118,4 @@ class ToolTestRequest(CamelModel):
     # 默认不查缓存：试跑就是为了看「这一次」真实发生了什么；
     # 打开后可以连点两次验证幂等命中（第二次 attempts=0、idemHit=true）
     use_idempotency: bool = False
+

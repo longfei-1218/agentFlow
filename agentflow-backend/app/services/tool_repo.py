@@ -10,6 +10,7 @@ import orjson
 
 from app.database import db
 from app.models.tool import BUILTIN_SCHEMAS, ToolCreate, ToolDef, ToolInvocation
+from app.resources import catalog
 from app.services.event_bus import utc_now
 
 COLS = (
@@ -47,10 +48,19 @@ def _normalize(payload: ToolCreate) -> ToolCreate:
     """内置工具的参数 Schema 用注册表里的定义覆盖，避免用户传进来一份不一致的。"""
     if payload.kind == "builtin":
         if not payload.builtin:
-            raise ValueError("内置工具必须指定 builtin（echo / now / calc）")
-        payload.params_schema = BUILTIN_SCHEMAS[payload.builtin]
+            raise ValueError("内置工具必须指定 builtin")
+        schema = catalog.builtin_schema(payload.builtin)
+        package = catalog.builtin_manifests().get(payload.builtin)
+        if schema is None:
+            schema = BUILTIN_SCHEMAS.get(payload.builtin)
+        if schema is None:
+            raise ValueError(f"未知内置工具: {payload.builtin}")
+        payload.params_schema = schema
         payload.method = "POST"
         payload.url = ""
+        if package:
+            payload.package_path = str(package[0])
+            payload.source = "builtin_resource"
     else:
         if not payload.url.strip():
             raise ValueError("HTTP 工具必须填 URL")

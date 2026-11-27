@@ -18,8 +18,10 @@ from typing import Any
 import httpx
 import orjson
 
+from app.config import settings
 from app.models.tool import ToolDef, ToolInvocation
-from app.services import tool_repo
+from app.resources import catalog
+from app.services import env_config, tool_repo
 from app.services.event_bus import utc_now
 
 HTTP_TIMEOUT = "timeout"
@@ -66,6 +68,20 @@ def render(value: str, args: dict[str, Any]) -> str:
     for key, item in args.items():
         result = result.replace("{{" + key + "}}", _stringify(item))
     return result
+
+
+def _tool_env_scope(tool: ToolDef) -> dict[str, str]:
+    try:
+        return env_config.resolve_env_map(tool.env)
+    except env_config.EnvConfigError as exc:
+        raise ToolError(str(exc), code="TOOL_ENV_MISSING") from exc
+
+
+def _expand_config(value: str | None, scope: dict[str, str]) -> str:
+    try:
+        return env_config.expand_env(value, scope=scope)
+    except env_config.EnvConfigError as exc:
+        raise ToolError(str(exc), code="TOOL_ENV_MISSING") from exc
 
 
 _TYPE_MAP = {
@@ -123,7 +139,12 @@ def _builtin_call(name: str, args: dict[str, Any]) -> Any:
         return {"iso": now.isoformat(), "tz": tz_name, "timestamp": int(now.timestamp())}
     if name == "calc":
         return {"result": _safe_eval(str(args.get("expression") or ""))}
-    raise ToolError(f"未知内置工具: {name}", code="TOOL_NOT_FOUND")
+    try:
+        return catalog.invoke_builtin(
+            name, args, {"artifact_dir": settings.ARTIFACT_DIR}
+        )
+    except catalog.BuiltinToolError as exc:
+        raise ToolError(str(exc), code=exc.code) from exc
 
 
 def _safe_eval(expression: str) -> float:
@@ -159,8 +180,12 @@ def _safe_eval(expression: str) -> float:
 
 
 async def _http_call(tool: ToolDef, args: dict[str, Any]) -> tuple[Any, int | None]:
-    url = render(tool.url, args)
-    headers = {key: render(value, args) for key, value in (tool.headers or {}).items()}
+    scope = _tool_env_scope(tool)
+    url = _expand_config(render(tool.url, args), scope)
+    headers = {
+        key: _expand_config(render(value, args), scope)
+        for key, value in (tool.headers or {}).items()
+    }
     method = tool.method.upper()
 
     kwargs: dict[str, Any] = {"headers": headers}
@@ -168,7 +193,7 @@ async def _http_call(tool: ToolDef, args: dict[str, Any]) -> tuple[Any, int | No
         kwargs["params"] = {key: _stringify(value) for key, value in args.items()}
     else:
         if tool.body_template:
-            rendered = render(tool.body_template, args)
+            rendered = _expand_config(render(tool.body_template, args), scope)
             try:
                 kwargs["json"] = orjson.loads(rendered)
             except orjson.JSONDecodeError as exc:

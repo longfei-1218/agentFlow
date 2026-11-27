@@ -1,16 +1,16 @@
-"""MCP Server 与工具调用的契约（R5）。
+"""MCP Server 与工具调用的契约。
 
-只做 stdio 传输：本地单用户场景下，MCP 的价值是「把一个本地可执行的工具进程接进画布」，
-stdio 正好覆盖（npx / uvx / python 脚本都行）。HTTP/SSE 传输留到需要多机共享时再加，
-不在这一轮假装支持。
+本地 MCP 走 stdio：后端启动一个子进程，用一行一条 JSON-RPC 通信；
+远程 MCP 走 http：POST JSON-RPC，兼容 JSON / SSE 响应，保留 Mcp-Session-Id。
 """
+
 from typing import Any, Literal
 
 from pydantic import Field
 
 from app.models.flow import CamelModel
 
-Transport = Literal["stdio"]
+Transport = Literal["stdio", "http"]
 
 
 class MCPServerDef(CamelModel):
@@ -19,10 +19,18 @@ class MCPServerDef(CamelModel):
     transport: Transport = "stdio"
     command: str = ""
     args: list[str] = Field(default_factory=list)
+    url: str = ""
+    headers: dict[str, str] = Field(default_factory=dict)
     env: dict[str, str] = Field(default_factory=dict)
     cwd: str | None = None
     timeout_s: float = Field(default=15, ge=1, le=300)
     enabled: bool = True
+    # 资源包元数据
+    package_path: str | None = None
+    manifest_json: dict[str, Any] | None = None
+    source: Literal["registry", "resource_package", "import"] = "registry"
+    status: Literal["installed", "verified", "staged", "rejected"] = "installed"
+    verified_at: str | None = None
     created_at: str | None = None
     updated_at: str | None = None
 
@@ -30,12 +38,19 @@ class MCPServerDef(CamelModel):
 class MCPServerCreate(CamelModel):
     name: str = Field(min_length=1, max_length=64)
     transport: Transport = "stdio"
-    command: str = Field(min_length=1, max_length=512)
+    command: str = ""
     args: list[str] = Field(default_factory=list)
+    url: str = ""
+    headers: dict[str, str] = Field(default_factory=dict)
     env: dict[str, str] = Field(default_factory=dict)
     cwd: str | None = None
     timeout_s: float = Field(default=15, ge=1, le=300)
     enabled: bool = True
+    package_path: str | None = None
+    manifest_json: dict[str, Any] | None = None
+    source: Literal["registry", "resource_package", "import"] = "registry"
+    status: Literal["installed", "verified", "staged", "rejected"] = "installed"
+    verified_at: str | None = None
 
 
 class MCPToolInfo(CamelModel):
