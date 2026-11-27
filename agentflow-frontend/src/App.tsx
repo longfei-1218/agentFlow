@@ -16,10 +16,11 @@ export default function App() {
   return (
     <BrowserRouter>
       <Routes>
+        {/* Agent 工作台：对话 + 编辑同屏，独立占满窗口，避免再被全局侧栏压缩 */}
+        <Route path="/agents/:id" element={<AgentEditorPage />} />
         <Route element={<Shell />}>
           <Route path="/" element={<Navigate to="/flows" replace />} />
           <Route path="/agents" element={<AgentsPage />} />
-          <Route path="/agents/:id" element={<AgentEditorPage />} />
           <Route path="/agents/:id/chat" element={<AgentChatPage />} />
           <Route path="/flows" element={<FlowListPage />} />
           <Route path="/flows/:id" element={<EditorPage />} />
