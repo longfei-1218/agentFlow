@@ -1,5 +1,6 @@
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import { Shell } from "@/components/layout/Shell";
+import { ChatPage } from "@/pages/ChatPage";
 import { EditorPage } from "@/pages/EditorPage";
 import { EvalPage } from "@/pages/EvalPage";
 import { FlowListPage } from "@/pages/FlowListPage";
@@ -17,6 +18,7 @@ export default function App() {
           <Route path="/" element={<Navigate to="/flows" replace />} />
           <Route path="/flows" element={<FlowListPage />} />
           <Route path="/flows/:id" element={<EditorPage />} />
+          <Route path="/flows/:id/chat" element={<ChatPage />} />
           <Route path="/runs" element={<RunsPage />} />
           <Route path="/runs/:id" element={<RunReplayPage />} />
           <Route path="/tools" element={<ToolsPage />} />

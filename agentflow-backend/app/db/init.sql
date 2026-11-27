@@ -1,5 +1,5 @@
--- AgentFlow Studio 表结构（10 张表，按可迁移设计，不用 SQLite 专有语法）
--- 已启用：flows / runs / run_events / settings / tools / tool_invocations；其余表先建好，避免后续迁移。
+-- AgentFlow Studio 表结构（按可迁移设计，不用 SQLite 专有语法）
+-- 已启用：flows / runs / run_events / settings / tools / tool_invocations / mcp_servers / 知识库 / conversations / chat_turns；其余表先建好，避免后续迁移。
 
 CREATE TABLE IF NOT EXISTS flows (
     id TEXT PRIMARY KEY,
@@ -23,6 +23,8 @@ CREATE TABLE IF NOT EXISTS runs (
     cost REAL NOT NULL DEFAULT 0.0,
     started_at TEXT,
     finished_at TEXT,
+    -- R5.1：对话模式下这一轮的 run 属于哪个会话；普通编辑器运行留空
+    conversation_id TEXT,
     FOREIGN KEY (flow_id) REFERENCES flows(id)
 );
 
@@ -158,3 +160,25 @@ CREATE TABLE IF NOT EXISTS eval_trials (
     PRIMARY KEY (result_id, case_id, trial),
     FOREIGN KEY (result_id) REFERENCES eval_results(id)
 );
+
+-- R5.1 对话模式：一个会话绑定一个流程；助手回复不单独落表，按 run_id 从 runs 还原
+CREATE TABLE IF NOT EXISTS conversations (
+    id TEXT PRIMARY KEY,
+    flow_id TEXT NOT NULL,
+    title TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (flow_id) REFERENCES flows(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS chat_turns (
+    id TEXT PRIMARY KEY,
+    conversation_id TEXT NOT NULL,
+    user_content TEXT NOT NULL,
+    run_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
+    FOREIGN KEY (run_id) REFERENCES runs(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_chat_turns_conv ON chat_turns(conversation_id, created_at);

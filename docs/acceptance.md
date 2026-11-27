@@ -388,7 +388,7 @@ Invoke-RestMethod -Uri http://127.0.0.1:8000/api/flows/flow_1c485778/run -Method
 
 ```powershell
 cd agentflow-backend
-.venv\Scripts\python.exe -m pytest          # 66 passed（约 24s；54 + MCP 5 + 知识库 4 + 子流程 3）
+.venv\Scripts\python.exe -m pytest          # 71 passed（约 25s；66 + 对话 5）
 
 cd ..\agentflow-frontend
 node node_modules\typescript\bin\tsc --noEmit   # 无输出
@@ -463,6 +463,55 @@ foreach($f in "flow_03b8009e","flow_3fc2aca8","flow_9ef0ee08"){
 - **事件协议只加不减**：新增 `knowledge_retrieved`；mcp 复用 `tool_call/tool_result` 并带 `source:"mcp"`；skill 复用 `node_completed` 并带 `skillFlow/depth/tokens`。前端 RunDrawer 靠这些字段展示，不需要新的抽屉。
 - **失败口径**：mcp / knowledge / skill 节点本身失败 → 整个 run 失败（`run_failed` 带错误码与 `nodeId`）；探测、试跑、召回这些「配置期」接口失败仍回 200 + `ok:false`，方便前端就地提示。
 - **`--reload` 又会骗人**：本轮改完 `mcp_client.py` 后探针仍报旧的 `NotImplementedError`，实际是 reloader 没换子进程。验收时若「代码明明改了但行为没变」，先按 README 的端口清理步骤杀掉 reloader + worker 再重启，别先怀疑实现。
+
+## R5.1 · 对话模式（B5.1）+ 聊天页
+
+状态：后端接口与单测已完成（`tests/test_chat.py` 5 条，含空消息 422、会话按 flow_id 隔离）；前端 `tsc --noEmit` 与 `vite build` 已通过。下面 A 表是页面验收口径，B 段是已实测的接口链路（后端重启后加载 chat 路由与 `runs.conversation_id` 列）。
+
+### A. 页面验收
+
+| # | 打开哪个页面 | 做什么 | 期望 |
+|---|---|---|---|
+| 1 | `http://127.0.0.1:5173/flows` | 鼠标悬停任意流程卡片 | 操作区出现「对话」图标；点它进入 `/flows/{id}/chat` |
+| 2 | `http://127.0.0.1:5173/flows/flow_3fc2aca8` | 顶栏点「对话」 | 有未保存改动会先保存再跳转；进入聊天页 |
+| 3 | 聊天页左侧 | 点「新建会话」 | 列表多一条「新会话」；右侧空态提示输入第一句话 |
+| 4 | 右侧输入框 | 输入「你好，请用一句话介绍你自己」，按 Enter | 立刻出现用户气泡；助手气泡先显示「思考中」，随后按 SSE token 逐步长出文字 |
+| 5 | 等回复结束 | 看气泡底部 | 状态 `succeeded`、tokens、cost、回放链接；左侧会话标题变成首条消息前 24 字 |
+| 6 | 同页再发一句 | 看请求 | 后端第二轮 `history` 含第一轮问/答；同一会话下出现两组气泡，顺序稳定 |
+| 7 | 刷新页面 | 重新进入会话 | 消息从后端重载，不依赖 localStorage；助手内容与 run 输出一致 |
+| 8 | 左侧会话 | 点删除 | 会话与 `chat_turns` 一起消失；再 GET 该 id 返回 404 `CONVERSATION_NOT_FOUND` |
+| 9 | `http://127.0.0.1:5173/flows/flow_78b1ae68` 点「对话」 | 发一条消息 | 409 `CHAT_HUMAN_UNSUPPORTED`，提示含 human 节点不支持对话；**不会**生成 turn |
+| 10 | 同页把模型 Key 清空后进聊天 | 发消息 | 409 `LLM_NOT_CONFIGURED`，引导去右上「模型设置」 |
+| 11 | 分别打开两个不同流程的聊天页 | 看左侧会话列表 | 只出现当前 `flow_id` 的会话；切换流程不会看到另一条流程的历史 |
+
+### B. 最快只验后端（已实测）
+
+```powershell
+$base="http://127.0.0.1:8000/api"
+# 1) 建会话（绑定一个已保存、无 human 的流程）
+$conv=Invoke-RestMethod -Method Post -Uri "$base/chat/conversations" -ContentType "application/json" -Body '{"flowId":"flow_3fc2aca8"}'
+$conv.id
+# 2) 发第一轮（202，返回 runId）
+$turn=Invoke-RestMethod -Method Post -Uri "$base/chat/conversations/$($conv.id)/turns" -ContentType "application/json" -Body '{"content":"你好，请用一句话介绍你自己"}'
+$turn.runId
+# 3) 轮询会话：助手消息由 run 终态回填
+Start-Sleep -Seconds 12
+Invoke-RestMethod "$base/chat/conversations/$($conv.id)" | Select-Object title,@{n="messages";e={$_.messages | Select-Object role,status,tokens,content}}
+# 4) human 流程应 409
+$bad=Invoke-RestMethod -Method Post -Uri "$base/chat/conversations" -ContentType "application/json" -Body '{"flowId":"flow_78b1ae68"}'
+try { Invoke-RestMethod -Method Post -Uri "$base/chat/conversations/$($bad.id)/turns" -ContentType "application/json" -Body '{"content":"测试"}' } catch { $_.ErrorDetails.Message }
+```
+
+实测结果（2026-11-27）：`conv_c975a2103a88` 首轮 → `run_05e9c8d0`，run `succeeded`，助手 271 tokens，会话标题改为「你好，请用一句话介绍你自己」；human 流程返回 409，`messages=0`。数据库侧 `runs.conversation_id` 已写入。
+
+### C. 口径与已知说明
+
+- **不改执行引擎**：聊天只是「会话 + 每轮一个普通 run」，`run_graph` 初始变量是 `{**DEFAULT_STATE.variables, **inputs}`，所以 `history` 直接作为 inputs 传入即可，不需要额外 input 节点。流程里想用历史，就在 prompt 里引用 `{{history}}`。
+- **历史只取成功 run**：失败/运行中的轮次不会进 `history`，避免把错误回答喂回模型。当前是硬截断（6 轮 / 3000 字），不做摘要与向量检索。
+- **没有助手消息表**：助手内容永远以 `runs.outputs_json` 为准，改 `answer_text` 的优先级即可调整取哪个字段。
+- **human 流程直接拒**：聊天页没有审批入口，硬接会在 run 里永久 `waiting`；所以入口处 409，比运行到一半再卡住更好排查。
+- **空消息是 422 不是 500**：`field_validator` 抛的 `ValueError` 会进 Pydantic `errors()` 的 `ctx`，原样 `JSONResponse` 不可序列化；`main.py` 的校验异常处理器把 `ctx` 值转成字符串。实测空白消息返回 422 `VALIDATION_ERROR`，`ctx.error=消息内容不能为空`。
+- **前端 SSE 用局部缓冲**：聊天页自己维护 `lastSeq`，只把 token 追加到当前 run 的助手气泡，不写全局 `runStore`，多会话/多标签不会串流。
 
 ## R6 · 评测与部署（B6） + 评测页
 

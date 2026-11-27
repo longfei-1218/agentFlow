@@ -39,6 +39,7 @@ class Run(CamelModel):
     cost_estimate: float = 0.0
     started_at: str | None = None
     finished_at: str | None = None
+    conversation_id: str | None = None
 
 
 class RunEvent(CamelModel):

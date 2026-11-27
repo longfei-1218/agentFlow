@@ -34,6 +34,7 @@ def row_to_run(row) -> Run:
         cost_estimate=row["cost"],
         started_at=row["started_at"],
         finished_at=row["finished_at"],
+        conversation_id=row["conversation_id"],
     )
 
 

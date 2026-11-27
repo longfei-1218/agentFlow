@@ -147,6 +147,9 @@ async def _migrate(conn: aiosqlite.Connection) -> None:
         {"created_at": "TEXT", "updated_at": "TEXT"},
     )
 
+    # R5.1 对话模式：老库的 runs 没有会话归属，补列不删历史
+    await _ensure_columns(conn, "runs", {"conversation_id": "TEXT"})
+
 
 async def get_db() -> aiosqlite.Connection:
     """兼容旧调用：返回共享连接。写操作请改用 db.execute / db.transaction。"""

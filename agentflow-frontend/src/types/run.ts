@@ -30,6 +30,7 @@ export interface Run {
   costEstimate: number;
   startedAt?: string | null;
   finishedAt?: string | null;
+  conversationId?: string | null;
 }
 
 export interface NodeStats {

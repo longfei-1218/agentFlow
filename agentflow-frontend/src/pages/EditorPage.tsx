@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { ReactFlowProvider } from "@xyflow/react";
-import { AlertTriangle, ArrowLeft, CheckCircle2, Rocket, Save, X } from "lucide-react";
+import { AlertTriangle, ArrowLeft, CheckCircle2, MessagesSquare, Rocket, Save, X } from "lucide-react";
 import { useNavigate, useParams } from "react-router-dom";
 import { ApiError, type ApiIssue } from "@/api/client";
 import { flowsApi } from "@/api/flows";
@@ -109,6 +109,19 @@ export function EditorPage() {
     }
   }, [validate, save, flow.id, dirty, reset, setRunId, setStatus, openSettings]);
 
+  const handleOpenChat = useCallback(async () => {
+    setActionError(null);
+    try {
+      if (dirty) await save();
+      navigate(`/flows/${flow.id}/chat`);
+    } catch (error) {
+      setActionError({
+        message: error instanceof Error ? error.message : "保存失败，无法进入对话",
+        issues: error instanceof ApiError ? error.detail : [],
+      });
+    }
+  }, [dirty, save, flow.id, navigate]);
+
   const handlePublish = async () => {
     setActionError(null);
     try {
@@ -189,6 +202,9 @@ export function EditorPage() {
           </button>
         )}
         <div className="ml-auto flex items-center gap-2">
+          <button className="btn" onClick={() => void handleOpenChat()}>
+            <MessagesSquare size={13} className="inline mr-1 -mt-0.5" />对话
+          </button>
           <button className="btn" onClick={() => void validate().then(() => setIssueOpen(true))}>
             <CheckCircle2 size={13} className="inline mr-1 -mt-0.5" />校验
           </button>

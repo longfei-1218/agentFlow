@@ -1,6 +1,6 @@
 # AgentFlow Studio · 后端
 
-FastAPI + aiosqlite + sse-starlette + httpx + LangGraph。当前进度：**B5 完成**（MCP stdio 客户端、知识库 BM25 检索、skill 子流程内联）。
+FastAPI + aiosqlite + sse-starlette + httpx + LangGraph。当前进度：**B5 + R5.1 完成**（MCP stdio 客户端、知识库 BM25 检索、skill 子流程内联；对话模式）。
 
 ## 已实现
 
@@ -28,6 +28,12 @@ FastAPI + aiosqlite + sse-starlette + httpx + LangGraph。当前进度：**B5 �
 - `app/engine/extra_nodes.py` + `app/engine/subflow.py`：mcp / knowledge / skill 三类节点。skill 用 `MemorySaver` **内联编译**子流程（不开事件、不落 runs、不写检查点），outputs 合并回父变量、tokens/cost 累加；限 3 层、拒自递归、拒含 `human` 的子流程。错误统一为 `NodeError(code)`，由 `graph_runner` / `loop` 落 `run_failed` 并带 `nodeId`。
 - `app/services/event_bus.py`：`run_id` 为空时只返回临时事件，**不写 `run_events`、不推 SSE**——这是子流程复用节点实现的前提。
 - `scripts/mcp_demo_server.py`：纯标准库的最小 MCP stdio server（`echo/add/now`），联调与验收用。
+
+**对话模式（R5.1）**
+- `app/models/chat.py` + `app/services/chat_repo.py` + `app/api/chat.py`：会话 CRUD、`chat_turns`（用户消息到 run 的映射）、`build_history`（只取 succeeded run，最近 6 轮 / 3000 字，超出丢最旧后尾部硬切）、`answer_text`（`outputs.text → result → answer → 首个非空字符串 → JSON`）。
+- `POST /api/chat/conversations/{id}/turns`：校验流程 → 拒绝 `human` 流程（409 `CHAT_HUMAN_UNSUPPORTED`）→ 有 llm 节点则检查 Key（409 `LLM_NOT_CONFIGURED`）→ 拼 history → 建 Run（`runs.conversation_id`）→ 写 turn → 首轮改标题 → 异步执行，返回 202 + `runId`。
+- **助手回复不落表**：读取会话时按 `chat_turns.run_id` 关联 `runs.outputs_json` 动态拼；run 失败时消息带 `status=failed` 与 `runs.error`。
+- 表：`conversations(id, flow_id, title, created_at, updated_at)`（flow_id 外键 `ON DELETE CASCADE`）、`chat_turns(id, conversation_id, user_content, run_id, created_at)`；`runs` 新增 `conversation_id`，`_migrate` 自动补列。
 
 **Run**
 - `GET /api/runs` 支持 `flow_id / status / started_after / started_before / limit`
@@ -100,7 +106,7 @@ Swagger: http://localhost:8000/docs
 ## 测试
 
 ```bash
-.venv\Scripts\python.exe -m pytest      # 66 passed（约 24s；连跑 4 次稳定）
+.venv\Scripts\python.exe -m pytest      # 71 passed（约 25s）
 ```
 
 覆盖：Flow 版本语义与校验、节点配置校验、节点 Schema 导出、Key 脱敏与优先级、

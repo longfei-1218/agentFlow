@@ -20,7 +20,15 @@ class Settings(BaseSettings):
     RUNNER: str = "graph"
     DEMO_STEP_DELAY: float = 0.05  # 节点间停顿（秒），测试里调大以验证取消
 
-    CORS_ORIGINS: list[str] = ["http://localhost:5173"]
+    # 本地单用户原型：localhost 与 127.0.0.1 是两个不同 Origin，浏览器不允许混用
+    CORS_ORIGINS: list[str] = [
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:8000",
+        "http://127.0.0.1:8000",
+    ]
+    # 5173 被占用换端口时也不用改配置；只放行本机回环地址
+    CORS_ORIGIN_REGEX: str = r"http://(localhost|127\.0\.0\.1)(:\d+)?"
 
 
 settings = Settings()

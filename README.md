@@ -2,7 +2,7 @@
 
 Web 端 Agent 编排平台（本地单用户原型）：画布拖拽定义执行拓扑 → 右侧配置参数 → 运行并实时观测 token / 工具调用 / 中间结果 → 用评测集做回归。
 
-**当前进度：R5 完成**（MCP stdio 客户端、知识库 BM25 检索、子流程内联）。
+**当前进度：R5 + R5.1 完成**（MCP stdio 客户端、知识库 BM25 检索、子流程内联；对话模式让单个流程以聊天方式连续跑）。
 下一步 R6：评测体系 + Docker 部署 + 评测页。
 
 ---
@@ -76,7 +76,7 @@ cd agentflow-frontend
 npm run dev
 ```
 
-打开 `http://localhost:5173`（`http://127.0.0.1:5173` 同样可用），会自动跳到 `/flows`。Vite 把 `/api` 代理到 `http://127.0.0.1:8000`，所以**不需要配 CORS、也不要把后端地址写进前端代码**。
+打开 `http://localhost:5173`（`http://127.0.0.1:5173` 同样可用），会自动跳到 `/flows`。Vite 把 `/api` 代理到 `http://127.0.0.1:8000`，正常请求不经过跨域；后端同时放行 `localhost` / `127.0.0.1` 的回环来源，所以直接访问 8000 也不会被浏览器拦。**不要把后端地址写进前端代码**。
 
 > 代理目标故意写 `127.0.0.1` 而不是 `localhost`：Windows 上 `localhost` 常先解析到 IPv6 `::1`，而 uvicorn 默认只监听 IPv4，会表现为「页面能开、接口一直转圈到超时」。`vite.config.ts` 里已加 `server.host: true`，让 5173 同时接受 IPv4/IPv6。
 
@@ -86,6 +86,7 @@ npm run dev
 |---|---|
 | `/flows` | 流程列表（新建 / 复制 / 删除 / 导入导出 JSON） |
 | `/flows/:id` | 编辑器（左节点库 / 中画布 / 右配置面板 + 底部运行抽屉） |
+| `/flows/:id/chat` | 对话模式（会话列表 + 消息气泡；每轮消息在后台创建一次普通 run） |
 | `/runs` | 运行历史（按流程 / 状态筛选） |
 | `/runs/:id` | 运行回放（事件时序 + 节点耗时 + 审批卡） |
 | `/tools` | 工具管理（R3 已实装：注册/试跑/调用记录） |
@@ -123,7 +124,8 @@ LLM_DEFAULT_MODEL=gpt-4o-mini
 MAX_STEPS=8
 RUNNER=loop
 DEMO_STEP_DELAY=0.05
-CORS_ORIGINS=["http://localhost:5173"]
+CORS_ORIGINS=["http://localhost:5173","http://127.0.0.1:5173","http://localhost:8000","http://127.0.0.1:8000"]
+CORS_ORIGIN_REGEX=http://(localhost|127\.0\.0\.1)(:\d+)?
 ```
 
 | 变量 | 作用 |
@@ -200,12 +202,28 @@ HTTP 工具的关键字段：`URL`（可含 `{{参数}}`）、`Headers`（JSON�
 
 ---
 
+## 对话模式（R5.1）
+
+把一个**已保存的流程**当成一个 Agent，用聊天方式连续对话：每轮输入是一条用户消息，输出是这条流程完整跑一遍的结果，不需要改执行引擎。
+
+- **会话绑定流程**：一个会话属于一个流程（`conversations.flow_id`，删流程级联删会话）。左侧可建多个会话，标题默认取首条消息前 24 字。
+- **每轮就是一次普通 run**：`POST /api/chat/conversations/{id}/turns` 会构建 `history` → 创建 run（`runs.conversation_id` 关联）→ 写 `chat_turns` → 异步执行。助手回复**不单独落表**，读取时用 `chat_turns.run_id` 回查 `runs.outputs_json`，run 失败就显示错误与回放链接。
+- **历史从成功 run 里取**：按时间取最近 6 轮、最多 3000 字，超出丢最旧的，最后再做尾部硬切。拼成「用户: … / 助手: …」文本放进变量 `history`；本轮消息在 `query`。
+- **前端流式**：发送后订阅该 run 的 SSE，token 只追加到当前会话的气泡里（有局部缓冲，不写全局 `runStore`，多会话不会串流）；`run_completed/run_failed` 后以服务端会话为准重载。
+- **限制**：含 `human` 审批节点的流程不支持对话（409 `CHAT_HUMAN_UNSUPPORTED`，聊天页没有审批入口）；含 `llm` 节点但没配 Key 回 409 `LLM_NOT_CONFIGURED`。
+- **接口**：`POST/GET /api/chat/conversations`、`GET/DELETE /api/chat/conversations/{id}`、`POST /api/chat/conversations/{id}/turns`（202，返回 `runId`）。
+
+> 记忆目前是**硬截断**，不是长短期记忆：没有摘要、没有向量检索。后续可在 `chat_repo.build_history` 里替换为「滑动窗口 + 摘要 + 向量召回」，会话层接口不用动。
+
+---
+
 ## 验证
 
 ```powershell
-# 后端：66 个用例。覆盖 Flow 版本语义/SSE 终态/取消/审批续跑、节点 Schema、Key 脱敏、MAX_STEPS、
+# 后端：71 个用例。覆盖 Flow 版本语义/SSE 终态/取消/审批续跑、节点 Schema、Key 脱敏、MAX_STEPS、
 # 模型名不匹配的可读报错、并发保存乐观锁、工具 CRUD/重试/幂等/FC 回路、图引擎的条件分支/有界循环/检查点续跑、
-# 空回答诊断（思维链 vs length 截断）、MCP 探测/调用与失败码、知识库切块/检索/MMR、子流程合并与递归/深度拦截
+# 空回答诊断（思维链 vs length 截断）、MCP 探测/调用与失败码、知识库切块/检索/MMR、子流程合并与递归/深度拦截、
+# 对话两轮历史回灌与消息配对、会话按 flow_id 隔离、human 流程 409、空消息 422、删除会话 404
 cd agentflow-backend
 .venv\Scripts\python.exe -m pytest
 
@@ -279,4 +297,5 @@ npm run build
 | **R3 ✅** | 工具注册表（HTTP + 内置 echo/now/calc）、超时/重试/幂等、llm 节点真 Function Calling | 工具管理页（注册/试跑/调用记录）、tool 节点工具下拉、llm 节点「绑定工具」勾选 |
 | **R4 ✅** | LangGraph 图执行器：条件边、有界循环、checkpointer 中断续跑（替代手写循环，保留 loop 做对照） | 分支/循环节点的双出口锚点与「分支连线」下拉、顶栏引擎标识、空回答（思维链吃满预算）警告 |
 | **R5 ✅** | MCP stdio 客户端、知识库切块 + BM25/MMR、skill 子流程内联；三类节点在图/手写引擎都可用 | MCP 服务页（注册/探测/试跑）、知识库页（文档/召回）、配置面板三处引用选择器、`knowledge_retrieved` 事件 |
+| **R5.1 ✅** | 会话层：conversations/chat_turns、每轮创建 run、历史回灌（近 6 轮 / 3000 字） | 聊天页、流程列表/编辑器「对话」入口、SSE 气泡追加 |
 | R6 | 评测体系 + Docker | 评测页 |

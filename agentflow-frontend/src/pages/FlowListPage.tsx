@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { Copy, GitBranch, Plus, Trash2 } from "lucide-react";
+import { Copy, GitBranch, MessageSquare, Plus, Trash2 } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { flowsApi } from "@/api/flows";
 import { runsApi } from "@/api/runs";
@@ -95,6 +95,13 @@ export function FlowListPage() {
                 <div className="mt-4 pt-3 border-t border-line flex items-center justify-between text-[11px] text-ink-3">
                   <span>{flow.nodes.length} 个节点 · {flow.edges.length} 条连线</span>
                   <span className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                    <button
+                      className="p-1 hover:text-primary"
+                      title="对话"
+                      onClick={(e) => { e.stopPropagation(); navigate(`/flows/${flow.id}/chat`); }}
+                    >
+                      <MessageSquare size={14} />
+                    </button>
                     <button
                       className="p-1 hover:text-primary"
                       title="复制"

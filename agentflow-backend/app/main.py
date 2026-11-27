@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from app.api import flows, knowledge, mcp, nodes, runs, settings as settings_api, tools
+from app.api import chat, flows, knowledge, mcp, nodes, runs, settings as settings_api, tools
 from app.config import settings
 from app.database import db, init_db
 from app.services.run_manager import run_manager
@@ -28,6 +28,7 @@ app = FastAPI(title="AgentFlow Studio API", version="1.1", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.CORS_ORIGINS,
+    allow_origin_regex=settings.CORS_ORIGIN_REGEX,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -39,6 +40,7 @@ app.include_router(settings_api.router, prefix="/api")
 app.include_router(tools.router, prefix="/api")
 app.include_router(mcp.router, prefix="/api")
 app.include_router(knowledge.router, prefix="/api")
+app.include_router(chat.router, prefix="/api")
 
 
 @app.exception_handler(HTTPException)
@@ -51,9 +53,17 @@ async def http_exception_handler(request: Request, exc: HTTPException):
 
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    # Pydantic v2 的 errors() 会在 ctx 里塞 ValueError 对象，直接 JSONResponse 会 500
+    detail = []
+    for error in exc.errors():
+        item = dict(error)
+        item.pop("url", None)
+        if isinstance(item.get("ctx"), dict):
+            item["ctx"] = {key: str(value) for key, value in item["ctx"].items()}
+        detail.append(item)
     return JSONResponse(
         status_code=422,
-        content={"code": "VALIDATION_ERROR", "message": "请求参数校验失败", "detail": exc.errors()},
+        content={"code": "VALIDATION_ERROR", "message": "请求参数校验失败", "detail": detail},
     )
 
 
