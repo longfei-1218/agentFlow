@@ -22,9 +22,15 @@ docs/
 
 ## 核心口径
 
-- **Agent 是全局可复用资源**：`AgentCreate {name, description, variables, prompt{system,template}, resources, model, output}`。流程节点只存 `agentId`，不做版本锁，改 Agent 立即影响引用它的流程。
+- **Agent 是全局可复用资源**：`AgentCreate {name, description, variables, prompt{system,template}, resources, model, output}`。流程节点只存 `agentId`；运行使用「当前保存的版本」，发布只负责生成不可变快照与版本绑定。
 - **Agent 可以零变量**：`variables=[]` 合法。新建 Agent 默认零变量；Agent 直聊时用户消息会追加到模板末尾，不会静默丢弃。_这是步骤 5 前取消的限制。_
 - **Flow v2 只有六类节点**：`start / agent / condition / loop / human / end`。`dslVersion=2`；旧 DSL 在 update / publish / validate / run 四个入口返回 `422 FLOW_DSL_LEGACY`。
+
+- **R6.0 版本管理**：草稿层（`agents` / `flows`）可编辑；发布层（`agent_versions` / `flow_versions`）只追加、不可变。发布时记录配置指纹、工具/MCP/知识库指纹、`git commit + dirty`，并绑定各 Agent 节点的发布版本。发布不检查内容是否有改动（同配置可再发一版）；版本名必填、说明可留空。自动保存不产生版本；Flow 首次发布从 v1 → v2。
+  - **运行口径**：始终使用当前保存的草稿；`runs.manifest_json` 同时记录发布指针与当前指纹，两者不一致时 `version_mode=draft`，评测默认只认 `published`。
+  - **回滚口径**：把发布指针指回历史版本 + 该版本快照写回草稿，不新增版本、不删除历史、不改任何 Agent 版本号；后续发布按 `MAX(version)+1` 继续。
+  - **升级兼容**：后端启动时对存量 Agent / v2 Flow 登记一次基线 v1（`note=基线导入`），只跑一次。
+  - **暂不做**：版本 diff（本期先提供每个版本的完整配置快照）。
 - **Agent 节点显式映射**：`{agentId, inputMap}`；`inputMap` 支持 `{{start.x}}`、`{{<nodeId>.output.field}}`、`{{<nodeId>.text}}`、`{{nodes.<nodeId>.output.field}}`。必填变量未映射会在运行前被 `FLOW_INVALID` 拦截并定位到节点。
 - **对话历史按作用域隔离**：`agentId + flowId + nodeId`；Agent 库直聊只有 `agentId`。每轮创建一条 `targetType=agent` 的 run。
 - **Run 统一目标**：`runs.targetType=flow|agent` + `targetId`；运行历史、回放、统计都按目标展示。
@@ -74,6 +80,7 @@ npm run dev
 | `/agents/:id/chat` | Agent 直聊或流程节点作用域对话；支持 `?flowId=&nodeId=` |
 | `/flows` | Flow 列表：新建、复制、删除、导入导出 |
 | `/flows/:id` | Flow v2 画布：六类节点、Agent 下拉与 inputMap、运行输入 |
+| `/versions` | 版本管理：Agent / 流程切换、版本时间线、配置快照、指纹与 commit、按版本回滚 |
 | `/runs` | 运行历史：按 Flow / Agent 目标筛选 |
 | `/runs/:id` | 回放：事件时序、节点耗时、审批卡 |
 | `/tools` `/mcp` `/knowledge` `/eval` | 工具、MCP、知识库、评测页 |
@@ -90,11 +97,18 @@ npm run dev
 - `GET/PUT/DELETE /api/agents/{id}`
 - `POST /api/agents/validate`、`POST /api/agents/{id}/validate`
 - `POST /api/agents/{id}/run`（同步调试）、`POST /api/agents/{id}/runs`（202 + SSE）
+- `POST /api/agents/{id}/publish`（body `{name, note?}`；版本名必填，快照 + 指纹 + commit）
+- `GET /api/agents/{id}/versions`、`GET .../versions/{version}`、`GET .../publish-state`
+- `POST /api/agents/{id}/rollback`：发布指针回退，不产生新版本
 
 **Flow**
 
 - `GET/POST /api/flows`、`GET/PUT/DELETE /api/flows/{id}`
 - `POST /api/flows/{id}/validate`、`publish`、`run`
+- `POST /api/flows/{id}/publish`：body `{name, note?}`，快照 + 绑定各节点 Agent 发布版本 + 工具指纹 + commit
+- `GET /api/flows/{id}/versions`、`GET .../versions/{version}`、`GET .../publish-state`
+- `POST /api/flows/{id}/rollback`：指针回退，不动 Agent 版本
+- `GET /api/versions`：版本管理页资源列表；`GET /api/versions/{kind}/{id}/{version}`
 - `GET /api/node-types`：只返回六类节点 Schema
 
 **Chat**
@@ -116,7 +130,7 @@ npm run dev
 ```powershell
 cd agentflow-backend
 .venv\Scripts\python.exe -m pytest
-# 期望 70 passed
+# 期望 81 passed
 
 cd ..\agentflow-frontend
 node node_modules\typescript\bin\tsc --noEmit
@@ -139,7 +153,7 @@ cd agentflow-backend
 - `inputMap` 只校验路径可解析，不限制只能引用直接上游。
 - Agent 资源逐条添加，MCP 工具靠探测勾选，没有批量导入。
 - 运行历史不支持按名称搜索。
-- Agent 实时引用无版本锁；编辑 Agent 会立即影响所有引用流程。
+- Agent 运行使用当前保存的配置；发布版本只用于快照与质量归因，本期不做版本 diff。
 - 旧 DSL 只读回放，不支持编辑、发布、校验或运行。
 - Flow v2 暂不支持并行扇出；分支用 condition 的 true/false 互斥边。
 - 对话历史是近 6 轮 / 3000 字硬截断，不做摘要或向量记忆。

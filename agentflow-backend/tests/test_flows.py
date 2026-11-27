@@ -68,7 +68,7 @@ async def test_put_keeps_version_and_publish_bumps_it(client):
         assert response.status_code == 200
         assert response.json()["version"] == 1, "自动保存（PUT）不应递增 version"
 
-    published = await client.post(f"/api/flows/{flow['id']}/publish")
+    published = await client.post(f"/api/flows/{flow['id']}/publish", json={"name": "首次发布"})
     assert published.status_code == 200
     assert published.json()["version"] == 2
 
@@ -110,7 +110,7 @@ async def test_put_with_stale_base_updated_at_is_rejected(client):
 
 async def test_publish_rejects_invalid_flow(client):
     flow = await create_flow(client, [], [], name="空白")
-    response = await client.post(f"/api/flows/{flow['id']}/publish")
+    response = await client.post(f"/api/flows/{flow['id']}/publish", json={"name": "非法流程"})
     assert response.status_code == 422
     assert response.json()["code"] == "FLOW_INVALID"
 

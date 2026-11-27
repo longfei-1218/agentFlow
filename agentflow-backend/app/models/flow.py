@@ -34,9 +34,13 @@ class FlowEdge(CamelModel):
 class Flow(CamelModel):
     id: str
     name: str
+    # 发布指针：只有发布才推进；回滚会把它指回历史版本
     version: int = 1
     # 1 = R1–R5 旧 DSL；2 = start/agent/condition/loop/human/end
     dsl_version: int = 1
+    # 草稿 / 发布指纹缓存，只由保存与发布反推
+    draft_hash: str | None = None
+    published_hash: str | None = None
     nodes: list[FlowNode]
     edges: list[FlowEdge]
     created_at: str | None = None

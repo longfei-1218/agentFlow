@@ -21,15 +21,21 @@ WRITABLE_FIELDS = {
 
 
 def row_to_run(row) -> Run:
+    keys = row.keys()
     return Run(
         id=row["id"],
         target_type=row["target_type"],
         target_id=row["target_id"],
         flow_version=row["flow_version"] or 1,
+        target_version=(row["target_version"] or 0) if "target_version" in keys else 0,
+        version_mode=(
+            row["version_mode"] if "version_mode" in keys and row["version_mode"] else "published"
+        ),
         status=RunStatus(row["status"]),
         inputs=orjson.loads(row["inputs_json"]),
         outputs=orjson.loads(row["outputs_json"]) if row["outputs_json"] else None,
         state=orjson.loads(row["state_json"] or "{}"),
+        manifest=orjson.loads(row["manifest_json"]) if "manifest_json" in keys and row["manifest_json"] else {},
         error=row["error"],
         token_usage=row["token_usage"],
         cost_estimate=row["cost"],

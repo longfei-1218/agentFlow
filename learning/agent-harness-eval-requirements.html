@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Agent Harness 评测平台 · 痛点与核心要求</title>
+<style>
+  :root {
+    --ink: #1f2328;
+    --muted: #656d76;
+    --line: #d8dee4;
+    --bg: #ffffff;
+    --soft: #f6f8fa;
+    --blue: #0969da;
+    --blue-bg: #ddf4ff;
+    --green: #1a7f37;
+    --green-bg: #dafbe1;
+    --amber: #9a6700;
+    --amber-bg: #fff8c5;
+    --red: #cf222e;
+    --red-bg: #ffebe9;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 40px 24px 80px;
+    background: var(--bg);
+    color: var(--ink);
+    font: 14px/1.75 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  }
+  .wrap { max-width: 960px; margin: 0 auto; }
+  h1 { font-size: 26px; margin: 0 0 6px; letter-spacing: -0.4px; }
+  h2 { font-size: 19px; margin: 44px 0 14px; padding-bottom: 8px; border-bottom: 2px solid var(--ink); }
+  h3 { font-size: 15px; margin: 24px 0 8px; }
+  p { margin: 8px 0; }
+  .sub { color: var(--muted); margin-bottom: 28px; }
+  .lead {
+    background: var(--soft);
+    border-left: 4px solid var(--blue);
+    padding: 14px 18px;
+    border-radius: 0 8px 8px 0;
+    margin: 20px 0;
+  }
+  .tag {
+    display: inline-block;
+    font-size: 12px;
+    font-weight: 600;
+    padding: 2px 9px;
+    border-radius: 20px;
+    margin-right: 6px;
+  }
+  .t-blue { background: var(--blue-bg); color: var(--blue); }
+  .t-green { background: var(--green-bg); color: var(--green); }
+  .t-amber { background: var(--amber-bg); color: var(--amber); }
+  .t-red { background: var(--red-bg); color: var(--red); }
+  table { width: 100%; border-collapse: collapse; margin: 14px 0 22px; font-size: 13px; }
+  th, td { border: 1px solid var(--line); padding: 10px 12px; text-align: left; vertical-align: top; }
+  th { background: var(--soft); font-weight: 600; }
+  td:first-child { white-space: nowrap; font-weight: 600; }
+  code {
+    font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+    font-size: 12.5px;
+    background: var(--soft);
+    padding: 1px 5px;
+    border-radius: 4px;
+  }
+  .card {
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 16px 20px;
+    margin: 14px 0;
+  }
+  .card.l1 { border-left: 5px solid var(--blue); }
+  .card.l2 { border-left: 5px solid var(--blue); }
+  .card.l3 { border-left: 5px solid var(--green); }
+  .card.l4 { border-left: 5px solid var(--amber); }
+  .card.l5 { border-left: 5px solid var(--red); }
+  .card h3 { margin-top: 0; }
+  ul { margin: 8px 0; padding-left: 22px; }
+  li { margin: 5px 0; }
+  .chk { list-style: none; padding-left: 2px; }
+  .chk li::before {
+    content: "☐";
+    color: var(--muted);
+    margin-right: 8px;
+  }
+  .quote {
+    background: var(--soft);
+    border-radius: 8px;
+    padding: 14px 18px;
+    font-style: italic;
+    color: var(--muted);
+    margin: 16px 0;
+  }
+  .foot {
+    margin-top: 48px;
+    padding-top: 16px;
+    border-top: 1px solid var(--line);
+    color: var(--muted);
+    font-size: 12px;
+  }
+  @media print {
+    body { padding: 0; }
+    h2 { page-break-after: avoid; }
+    .card { page-break-inside: avoid; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>Agent Harness 评测平台</h1>
+<p class="sub">痛点凝练 + 评测质量核心要求 · 对齐 AgentFlow 现状 · 2026-11-27</p>
+
+<div class="lead">
+<strong>一句话结论：</strong>评测质量问题不是"分数不够高"，而是从"定义什么叫好"到"线上失败回流"这条链路上的五环失真，被 Agent 的非确定性和多步轨迹逐级放大。平台的核心要求因此不是"能打分"，而是让每一环都可信。
+</div>
+
+<h2>一、痛点五环（逐级放大，不是并列）</h2>
+
+<table>
+<tr><th style="width:90px">环节</th><th style="width:240px">现象</th><th>根因与后果</th><th style="width:180px">可量化信号</th></tr>
+<tr>
+  <td>1 定义</td>
+  <td>什么叫"成功"说不清，判分器自己就有 bug</td>
+  <td>Anthropic 在 CORE-Bench 上给 Opus 4.5 测出 42%，查下来是判分器把 <code>96.12</code> 判错、任务描述有歧义、随机任务不可复现；修完判分器、换中性脚手架后同一模型跑到 95%，中间没重训。低分可能是题坏了，不是 Agent 不行。</td>
+  <td>两位领域专家能否独立给出相同通过判定；pass@100 是否仍为 0</td>
+</tr>
+<tr>
+  <td>2 口径</td>
+  <td>单次跑分方差大，pass@k 不统一，排名不可信</td>
+  <td>同一输入不同输出，单次结果不足以比较两版提示词。22 个基准的方差分解显示：给"模型+脚手架"整体排序可靠度 0.935–0.994，给底层模型排序只有 0.148–0.841；无限堆同类任务最多提升 0.097。</td>
+  <td>多次 trial 的均值±方差；能力集与回归集是否分开</td>
+</tr>
+<tr>
+  <td>3 裁判</td>
+  <td>LLM judge 有偏差，不校准就漂移，给假信号</td>
+  <td>位置偏差、冗长偏差多数团队从不测量，评测流水线"看起来自动化、实则系统性出错"。人类评审一天几百条，生产环境百万条，人工 RCA 在试点可用、上线即崩。</td>
+  <td>judge-human 一致率（需人工标注集持续校准）</td>
+</tr>
+<tr>
+  <td>4 归因</td>
+  <td>知道挂了，不知道错在哪一步、是谁的锅</td>
+  <td>TRAIL 基准（148 条标注 trace、1987 个 span、575 个错误 span）上，最强单体 LLM 联合准确率仅 11%——既找对位置又找对类型几乎做不到，只能人肉翻日志。</td>
+  <td>错误定位准确率 + 类型分类 F1 + 联合准确率</td>
+</tr>
+<tr>
+  <td>5 闭环</td>
+  <td>线上失败不回流，评测集三个月就与现实脱节</td>
+  <td>工具 schema 变了、政策更新了、用户问法变了，静态评测集不再代表当前系统。事故修好只解决今天，不进回归集三个月后会被另一次改动带回来。</td>
+  <td>线上失败回流率；评测集版本/负责人/刷新日期</td>
+</tr>
+</table>
+
+<div class="quote">能力涨不等于可靠性涨：普林斯顿 HAL 团队测 14 个模型，能力分从 35% 涨到 80%，可靠性只从 0.70 涨到 0.85。稳定性是真痛点，但必须拆成"一致性 / 鲁棒性 / 可预测性 / 安全约束"四个维度单独度量。</div>
+
+<h2>二、核心要求五层能力栈</h2>
+<p>评测质量 = 五层都可信，而不是某一层分数高。下层是上层地基，缺任何一层，上层的分数都不可信。</p>
+
+<div class="card l1">
+<h3><span class="tag t-blue">L1</span>结构化 trace（地基）</h3>
+<ul>
+  <li>span 级事件记录：每次 LLM 调用、工具调用、状态变更都带时间戳、耗时、成本、版本。</li>
+  <li>可回放：能从事件流重建执行现场，而不是靠人读文本日志猜。</li>
+  <li>版本绑定：每个 trial 记录提示词版本、模型版本、工具 schema 版本、代码版本。</li>
+  <li>分数打在环境终态（数据库行、文件、工单状态），而不是 Agent 的自我陈述。</li>
+</ul>
+<strong>验收：</strong><span class="tag t-green">可演示</span>任选一次失败运行，能完整回放每次工具调用与参数，且能确认当时跑的是哪版配置。
+</div>
+
+<div class="card l2">
+<h3><span class="tag t-blue">L2</span>结果 + 轨迹双评</h3>
+<ul>
+  <li>结果评（outcome）：终态断言——文件存在、字段完整、工单状态正确、引用有效。</li>
+  <li>轨迹评（trajectory）：工具选择对不对、参数正确率（5 个参数对 4 个记 80%，不搞 0/1）、调用顺序、是否调用禁用工具、失败后是否恢复、有无无意义循环、停止时是否满足完成条件。</li>
+  <li>单步评（step）：逐 span 判定，支撑任意长度 trace（分解评测可覆盖 100% trace，单体 judge 有 22%–29% 长 trace 超上下文读不进去）。</li>
+</ul>
+<strong>验收：</strong><span class="tag t-green">可演示</span>构造"答案对但轨迹错"（如先访问禁用数据源再换回）和"轨迹对但结果错"（保存失败）两个用例，平台能分别抓出来。
+</div>
+
+<div class="card l3">
+<h3><span class="tag t-green">L3</span>可信裁判</h3>
+<ul>
+  <li>grader 分级：code-based（断言/测试/状态检查）→ model-based（语义/风格/覆盖度）→ human（专家校准）。能用代码判就别请裁判。</li>
+  <li>多次 trial：报均值、方差、pass@k，不用单次结果下结论。</li>
+  <li>judge 校准：维护人工标注集，定期跟踪 judge-human 一致率，低于阈值就重校准。</li>
+  <li>能力评测与回归评测分离：能力集允许低通过率（爬坡用），回归集必须接近 100%（门禁用）。</li>
+  <li>判分器也要被测：用 golden cases 验证判分器本身，防止 42% 那种冤案。</li>
+</ul>
+<strong>验收：</strong><span class="tag t-green">可演示</span>同一批用例跑 5 次，输出带方差的报告；能查出 judge 与人工标注不一致的样本。
+</div>
+
+<div class="card l4">
+<h3><span class="tag t-amber">L4</span>故障归因（差异化能力）</h3>
+<ul>
+  <li>错误分类法：借鉴 TRAIL 三分——推理错误（幻觉、检索差、工具选错）、系统执行错误（429/401/500/超时/资源耗尽）、规划协调错误（目标偏离、编排错、上下文丢失）。</li>
+  <li>span 级定位：把 trace 拆成 span 逐个评，再自顶向下聚合。同一模型定位准确率从 0.292 升到 0.823（2.8×），说明瓶颈是评测组织方式而非模型能力。</li>
+  <li>规则优先：20 条启发式规则在 TRAIL 上做到 60.1% 联合准确率、100% 精确率、零成本，是最好 LLM（11.9%）的 5 倍。先抓循环、上下文丢失、规格不符这类结构性问题，剩余 case 再交给 LLM 做语义归因。</li>
+  <li>分层报告：结果层告诉我"错了"，轨迹层告诉我"哪步错了"，归因层告诉我"为什么错"——三层都要有。</li>
+</ul>
+<strong>验收：</strong><span class="tag t-green">可演示</span>注入一个已知故障（如重复调用、空检索后硬下结论），平台能给出正确分类和出错 span。
+</div>
+
+<div class="card l5">
+<h3><span class="tag t-red">L5</span>闭环门禁</h3>
+<ul>
+  <li>线上失败一键回流成回归用例；每次事故都必须变成新 case。</li>
+  <li>CI/CD 门禁：回归集分数下降就阻断发布；能力集变化单独观察，不与门禁混用。</li>
+  <li>配置对比：改提示词、模型、工具后，用同一评测集跨配置对比，用数据而非直觉决策。</li>
+  <li>评测集生命周期：每个数据集带版本、负责人、刷新日期，防止与现实脱节。</li>
+</ul>
+<strong>验收：</strong><span class="tag t-green">可演示</span>制造一次回归（改坏提示词），CI 能阻断；线上失败样本能一键进入回归集。
+</div>
+
+<h2>三、AgentFlow 落地优先级</h2>
+<table>
+<tr><th style="width:70px">优先级</th><th style="width:200px">做什么</th><th>对应位置与做法</th></tr>
+<tr>
+  <td><span class="tag t-red">P0</span></td>
+  <td>事件打错误标签</td>
+  <td>在现有事件流上按 TRAIL 三分法给 span 标注错误类型；<code>loop.py</code> 的重复检测、<code>llm.py</code> 的 4xx/5xx 区分与工具错误回灌，已是天然信号源，直接升级为归因信号。</td>
+</tr>
+<tr>
+  <td><span class="tag t-red">P0</span></td>
+  <td>规则检测器</td>
+  <td>零成本先上：重复动作、超步数、工具 4xx、空检索后仍下结论、调用禁用工具。规则命中直接出归因结论，不惊动 LLM。</td>
+</tr>
+<tr>
+  <td><span class="tag t-amber">P1</span></td>
+  <td>评测后端接通（README 的 R6）</td>
+  <td>把 EvalPage 前端原型接到真实 API：数据集管理、grader 编写、实验追踪、比较视图、线上回流五件套。</td>
+</tr>
+<tr>
+  <td><span class="tag t-amber">P1</span></td>
+  <td>span 分解评测</td>
+  <td>不把整条 trace 塞给 judge；按事件边界分段评再聚合，同时解决长 trace 超上下文的问题。</td>
+</tr>
+<tr>
+  <td><span class="tag t-blue">P2</span></td>
+  <td>judge 校准 + CI 门禁</td>
+  <td>维护人工标注集，跟踪一致率；能力集/回归集分离，回归门禁接近 100%。</td>
+</tr>
+</table>
+
+<h2>四、面试讲法</h2>
+<div class="quote">
+"我把评测质量问题拆成五环：定义、口径、裁判、归因、闭环，每一环都有失真，非确定性和多步轨迹会逐级放大。对应的平台能力是五层：结构化 trace 打底，结果和轨迹双评，裁判分级并可校准，归因用 span 分解加规则优先，最后线上失败回流成回归门禁。我自己的项目已完成事件流和回放这层，正在补归因——TRAIL 上单体 LLM 归因只有 11%，但规则优先能到 60%，所以我的做法是先规则后 LLM。"
+</div>
+<p>这段话命中面试官最爱追问的三点：<strong>怎么量化</strong>（联合准确率、judge 一致率、方差）、<strong>怎么复现</strong>（版本绑定、回放）、<strong>有没有踩过坑</strong>（判分器 bug、长 trace 超上下文）。</p>
+
+<div class="foot">
+生成于 2026-11-27 · 配套阅读：agent-interview-handbook.html、agentflow-interview-walkthrough.html<br>
+数据来源：Anthropic《Demystifying evals for AI agents》、HAL Reliability (arXiv 2602.16666)、TRAIL benchmark、Holistic Evaluation and Failure Diagnosis (arXiv 2605.14865)、arXiv 2610.00651 及 2026 年评测工具公开资料。
+</div>
+
+</div>
+</body>
+</html>

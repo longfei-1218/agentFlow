@@ -21,7 +21,11 @@ export interface Flow {
   id: string;
   name: string;
   dslVersion: number;
+  /** 发布指针：只有发布才推进；回滚会把它指回历史版本 */
   version: number;
+  /** 草稿 / 发布语义指纹，用来判断「有未发布改动」 */
+  draftHash?: string | null;
+  publishedHash?: string | null;
   nodes: FlowNode[];
   edges: FlowEdge[];
   createdAt?: string;

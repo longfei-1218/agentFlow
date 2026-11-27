@@ -10,6 +10,8 @@ from app.database import db
 from app.engine import executor
 from app.models.flow import Flow, FlowCreate, FlowEdge, FlowNode
 from app.models.run import Run, RunStatus
+from app.models.version import PublishRequest, PublishState, RollbackRequest, VersionDetail
+from app.services import run_manifest, version_repo
 from app.services.event_bus import event_bus, utc_now
 from app.services.flow_repo import load_flow, row_to_flow, save_flow
 from app.services.flow_service import validate_flow_runtime
@@ -74,7 +76,7 @@ def _legacy_flow_response() -> JSONResponse:
 
 @router.get("", response_model=list[Flow])
 async def list_flows():
-    rows = await db.fetchall("SELECT dsl_json FROM flows ORDER BY updated_at DESC")
+    rows = await db.fetchall("SELECT * FROM flows ORDER BY updated_at DESC")
     return [row_to_flow(row) for row in rows]
 
 
@@ -94,19 +96,27 @@ async def create_flow(payload: FlowCreate):
         name=payload.name,
         version=1,
         dsl_version=2,
+        draft_hash=None,
+        published_hash=None,
         nodes=nodes,
         edges=edges,
         created_at=now,
         updated_at=now,
     )
+    draft_hash = version_repo.flow_config_hash(flow)
+    flow = flow.model_copy(update={"draft_hash": draft_hash})
     await db.execute(
-        "INSERT INTO flows (id, name, version, dsl_json, created_at, updated_at) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
+        "INSERT INTO flows (id, name, version, draft_hash, published_hash, dsl_json, created_at, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         (
             flow.id,
             flow.name,
             flow.version,
-            orjson.dumps(flow.model_dump()).decode(),
+            draft_hash,
+            None,
+            orjson.dumps(
+                flow.model_dump(exclude={"draft_hash", "published_hash"})
+            ).decode(),
             now,
             now,
         ),
@@ -154,6 +164,8 @@ async def update_flow(flow_id: str, payload: FlowCreate):
         name=payload.name,
         version=existing.version,
         dsl_version=2,
+        draft_hash=existing.draft_hash,
+        published_hash=existing.published_hash,
         nodes=payload.nodes if payload.nodes is not None else existing.nodes,
         edges=payload.edges if payload.edges is not None else existing.edges,
         created_at=existing.created_at,
@@ -163,16 +175,100 @@ async def update_flow(flow_id: str, payload: FlowCreate):
 
 
 @router.post("/{flow_id}/publish", response_model=Flow)
-async def publish_flow(flow_id: str):
-    """显式发布：version + 1，评测按此版本做回归对比。"""
+async def publish_flow(flow_id: str, payload: PublishRequest | None = None):
+    """发布 = 快照 + 配置指纹 + 绑定各节点 Agent 发布版本 + 代码 commit。
+
+    回滚过的流程版本指针可能小于历史最大版本，发布层按 MAX+1 追加；
+    不检查内容是否有改动，版本名必填、说明可留空。
+    """
     existing = await load_flow(flow_id)
     if existing.dsl_version != 2:
         return _legacy_flow_response()
-    result = await validate_flow_runtime(existing)
-    if not result.valid:
-        return _invalid_flow_response(result.errors)
-    flow = existing.model_copy(update={"updated_at": _now()})
-    return await save_flow(flow, bump_version=True)
+
+    name = (payload.name if payload else "").strip()
+    if not name:
+        return JSONResponse(
+            status_code=422,
+            content={"code": "VERSION_NAME_REQUIRED", "message": "发布前请填写版本名", "detail": None},
+        )
+
+    # 先按当前保存内容做结构校验，避免 Agent 绑定错误掩盖真正的编排错误
+    current_check = await validate_flow_runtime(existing)
+    if not current_check.valid:
+        return _invalid_flow_response(current_check.errors)
+
+    pins, pinned, missing = await run_manifest.resolve_flow_pins(existing)
+    if missing:
+        return JSONResponse(
+            status_code=422,
+            content={
+                "code": "AGENT_VERSION_MISSING",
+                "message": "发布前必须先发布这些 Agent 节点引用的 Agent",
+                "detail": missing,
+            },
+        )
+
+    # 关键：用「绑定的 Agent 发布快照」再校验一次 inputMap；
+    # 草稿里改过变量而没发布 Agent 时，这里会拦住，避免发布一个跑不动的版本
+    bound_check = await validate_flow_runtime(existing, agents_by_node=pinned)
+    if not bound_check.valid:
+        return _invalid_flow_response(bound_check.errors)
+
+    await version_repo.publish_flow(
+        existing,
+        agent_refs=pins,
+        pinned_agents=list(pinned.values()),
+        name=name,
+        note=((payload.note if payload else "") or "").strip(),
+    )
+    return await load_flow(flow_id)
+
+
+@router.get("/{flow_id}/versions", response_model=list[VersionDetail])
+async def list_flow_versions(flow_id: str):
+    await load_flow(flow_id)
+    return await version_repo.list_versions("flow", flow_id)
+
+
+@router.get("/{flow_id}/versions/{version}", response_model=VersionDetail)
+async def get_flow_version(flow_id: str, version: int):
+    try:
+        return await version_repo.get_version("flow", flow_id, version)
+    except version_repo.VersionNotFound as exc:
+        return JSONResponse(
+            status_code=404,
+            content={"code": "VERSION_NOT_FOUND", "message": str(exc), "detail": None},
+        )
+
+
+@router.get("/{flow_id}/publish-state", response_model=PublishState)
+async def get_flow_publish_state(flow_id: str):
+    try:
+        return await version_repo.publish_state("flow", flow_id)
+    except version_repo.VersionNotFound as exc:
+        return JSONResponse(
+            status_code=404,
+            content={"code": "VERSION_NOT_FOUND", "message": str(exc), "detail": None},
+        )
+
+
+@router.post("/{flow_id}/rollback", response_model=Flow)
+async def rollback_flow(flow_id: str, payload: RollbackRequest):
+    """发布指针指回历史版本 + 该版本快照写回草稿；不改动任何 Agent 的版本。"""
+    await load_flow(flow_id)
+    try:
+        await version_repo.rollback("flow", flow_id, payload.version)
+    except version_repo.VersionNotFound as exc:
+        return JSONResponse(
+            status_code=404,
+            content={"code": "VERSION_NOT_FOUND", "message": str(exc), "detail": None},
+        )
+    except version_repo.VersionAlreadyCurrent as exc:
+        return JSONResponse(
+            status_code=409,
+            content={"code": "VERSION_ALREADY_CURRENT", "message": str(exc), "detail": None},
+        )
+    return await load_flow(flow_id)
 
 
 @router.delete("/{flow_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -215,23 +311,33 @@ async def start_run(flow_id: str, payload: dict | None = None):
             )
 
     inputs = (payload or {}).get("inputs", {}) if payload else {}
+    # 运行时用「当前保存的版本」；清单记录发布指针与当前指纹，供回放 / 评测定位
+    manifest = await run_manifest.build_flow_run_manifest(flow)
+    mode = str(manifest.get("versionMode") or "draft")
     run = Run(
         id=f"run_{uuid.uuid4().hex[:8]}",
         target_type="flow",
         target_id=flow_id,
         flow_version=flow.version,
+        target_version=flow.version,
+        version_mode=mode,  # type: ignore[arg-type]
+        manifest=manifest,
         status=RunStatus.PENDING,
         inputs=inputs,
         started_at=utc_now(),
     )
     await db.execute(
-        "INSERT INTO runs (id, target_type, target_id, flow_version, status, inputs_json, state_json, "
-        "token_usage, cost, started_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO runs (id, target_type, target_id, flow_version, target_version, version_mode, "
+        "manifest_json, status, inputs_json, state_json, token_usage, cost, started_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             run.id,
             run.target_type,
             run.target_id,
             run.flow_version,
+            run.target_version,
+            run.version_mode,
+            orjson.dumps(manifest).decode(),
             run.status.value,
             orjson.dumps(inputs).decode(),
             "{}",

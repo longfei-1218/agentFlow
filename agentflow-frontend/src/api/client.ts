@@ -29,7 +29,7 @@ function normalizeIssues(detail: unknown): ApiIssue[] {
     return {
       nodeId: (record.nodeId as string) ?? null,
       field: (record.field as string) ?? null,
-      message: String(record.message ?? record.msg ?? "校验失败"),
+      message: String(record.message ?? record.msg ?? record.reason ?? "校验失败"),
     };
   });
 }

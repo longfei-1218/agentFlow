@@ -24,6 +24,12 @@ export interface Run {
   targetType: RunTargetType;
   targetId: string;
   flowVersion: number;
+  /** 本次运行对应的发布版本（Agent 运行也记），0 = 从未发布 */
+  targetVersion: number;
+  /** published = 当前保存内容与发布指针一致；draft = 跑了未发布改动 */
+  versionMode: "published" | "draft";
+  /** 运行期版本清单：配置指纹 / Agent 版本 / 工具指纹 / 代码 commit */
+  manifest: Record<string, unknown>;
   status: RunStatus;
   inputs: Record<string, unknown>;
   outputs?: Record<string, unknown> | null;

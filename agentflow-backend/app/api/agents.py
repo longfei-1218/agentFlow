@@ -12,7 +12,13 @@ from app.models.agent import (
     AgentValidationResult,
 )
 from app.models.run import Run
-from app.services import agent_repo, agent_service
+from app.models.version import (
+    PublishRequest,
+    PublishState,
+    RollbackRequest,
+    VersionDetail,
+)
+from app.services import agent_repo, agent_service, version_repo
 from app.services.event_bus import event_bus
 from app.services.run_manager import run_manager
 from app.services.run_repo import max_seq
@@ -92,6 +98,79 @@ async def validate_saved(agent_id: str):
         result.valid = False
         result.errors.extend(runtime_issues)
     return result
+
+
+# ---------- R6.0 版本：发布 / 版本列表 / 回滚 ----------
+
+
+def _version_error(code: str, message: str, detail=None) -> JSONResponse:
+    return JSONResponse(
+        status_code=422 if code != "VERSION_NOT_FOUND" else 404,
+        content={"code": code, "message": message, "detail": detail},
+    )
+
+
+@router.post("/{agent_id}/publish", response_model=Agent)
+async def publish_agent(agent_id: str, payload: PublishRequest | None = None):
+    """发布 = 生成不可变快照 + 记录配置指纹 / 资源指纹 / 代码 commit。
+
+    不检查内容是否有改动：同配置再次发布也会生成新版本，版本名用于区分场景。
+    """
+    try:
+        agent = await agent_repo.get_agent(agent_id)
+    except agent_repo.AgentNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    name = (payload.name if payload else "").strip()
+    if not name:
+        return _version_error("VERSION_NAME_REQUIRED", "发布前请填写版本名")
+
+    definition = AgentCreate(**agent.model_dump(by_alias=True))
+    result = await agent_service.validate_agent(definition)
+    if not result.valid:
+        return _invalid(result)
+
+    await version_repo.publish_agent(
+        agent, name=name, note=((payload.note if payload else "") or "").strip()
+    )
+    return await agent_repo.get_agent(agent_id)
+
+
+@router.get("/{agent_id}/versions", response_model=list[VersionDetail])
+async def list_agent_versions(agent_id: str):
+    try:
+        await agent_repo.get_agent(agent_id)
+    except agent_repo.AgentNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return await version_repo.list_versions("agent", agent_id)
+
+
+@router.get("/{agent_id}/versions/{version}", response_model=VersionDetail)
+async def get_agent_version(agent_id: str, version: int):
+    try:
+        return await version_repo.get_version("agent", agent_id, version)
+    except version_repo.VersionNotFound as exc:
+        return _version_error("VERSION_NOT_FOUND", str(exc))
+
+
+@router.get("/{agent_id}/publish-state", response_model=PublishState)
+async def get_agent_publish_state(agent_id: str):
+    try:
+        return await version_repo.publish_state("agent", agent_id)
+    except version_repo.VersionNotFound as exc:
+        return _version_error("VERSION_NOT_FOUND", str(exc))
+
+
+@router.post("/{agent_id}/rollback", response_model=Agent)
+async def rollback_agent(agent_id: str, payload: RollbackRequest):
+    """把发布指针指回历史版本，并把该版本快照写回草稿；不改任何版本号。"""
+    try:
+        await version_repo.rollback("agent", agent_id, payload.version)
+    except version_repo.VersionNotFound as exc:
+        return _version_error("VERSION_NOT_FOUND", str(exc))
+    except version_repo.VersionAlreadyCurrent as exc:
+        return _version_error("VERSION_ALREADY_CURRENT", str(exc))
+    return await agent_repo.get_agent(agent_id)
 
 
 @router.post("/{agent_id}/runs", response_model=Run, status_code=202)

@@ -10,7 +10,9 @@ import { createDefaultFlow, downloadFlow } from "@/utils/flow";
 
 const titles: Record<string, string> = {
   "/flows": "流程编排",
+  "/agents": "Agent 库",
   "/runs": "运行历史",
+  "/versions": "版本管理",
   "/tools": "工具管理",
   "/knowledge": "知识库",
   "/eval": "评测回归",

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { ArrowLeft, Bot, CheckCircle2, Database, Plug, Plus, Save, Trash2, Wrench } from "lucide-react";
+import { ArrowLeft, Bot, CheckCircle2, Database, Plug, Plus, Rocket, Save, Trash2, Wrench } from "lucide-react";
 import { Link, useParams } from "react-router-dom";
 import { agentsApi } from "@/api/agents";
 import { ApiError } from "@/api/client";
@@ -7,6 +7,7 @@ import { knowledgeApi, type KnowledgeBase } from "@/api/knowledge";
 import { mcpApi, type MCPServer, type MCPToolInfo } from "@/api/mcp";
 import { toolsApi, type ToolDef } from "@/api/tools";
 import { AgentChatPanel } from "@/components/agents/AgentChatPanel";
+import { PublishDialog } from "@/components/versions/PublishDialog";
 import { useSettingsStore } from "@/store/settingsStore";
 import {
   VARIABLE_TYPES,
@@ -106,6 +107,14 @@ export function AgentEditorPage() {
   const [notice, setNotice] = useState<string | null>(null);
   const [validation, setValidation] = useState<AgentValidationResult | null>(null);
   const [chatReloadToken, setChatReloadToken] = useState(0);
+  // 发布指针与指纹：来自服务端列，和可编辑的 form 分开，避免保存草稿把版本号带进 DSL
+  const [meta, setMeta] = useState<{ version: number; draftHash: string | null; publishedHash: string | null }>({
+    version: 0,
+    draftHash: null,
+    publishedHash: null,
+  });
+  const [publishOpen, setPublishOpen] = useState(false);
+  const [publishing, setPublishing] = useState(false);
 
   const [tools, setTools] = useState<ToolDef[]>([]);
   const [servers, setServers] = useState<MCPServer[]>([]);
@@ -141,6 +150,11 @@ export function AgentEditorPage() {
           output: agent.output,
         };
         setForm(payload);
+        setMeta({
+          version: agent.version,
+          draftHash: agent.draftHash,
+          publishedHash: agent.publishedHash,
+        });
         setOutputVariables(schemaToOutputVariables(agent.output.schema));
         setOutputEdited(false);
         setError(null);
@@ -245,8 +259,13 @@ export function AgentEditorPage() {
     setError(null);
     setNotice(null);
     try {
-      await agentsApi.update(id, payload);
+      const updated = await agentsApi.update(id, payload);
       setForm(payload);
+      setMeta({
+        version: updated.version,
+        draftHash: updated.draftHash,
+        publishedHash: updated.publishedHash,
+      });
       setDirty(false);
       setNotice("已保存");
       setChatReloadToken((value) => value + 1);
@@ -259,8 +278,33 @@ export function AgentEditorPage() {
     }
   };
 
-  const validate = async () => {
-    if (!form) return;
+  const publish = async (versionName: string, note: string) => {
+    if (!id) return;
+    if (!preparePayload()) return;
+    setPublishing(true);
+    setError(null);
+    setNotice(null);
+    try {
+      // 发布取服务端已保存内容：有未保存改动时先落盘，避免发出去的快照和屏幕不一致
+      if (dirty) await save();
+      const published = await agentsApi.publish(id, { name: versionName, note });
+      setMeta({
+        version: published.version,
+        draftHash: published.draftHash,
+        publishedHash: published.publishedHash,
+      });
+      setPublishOpen(false);
+      setNotice(`已发布 v${published.version}，快照与指纹已写入版本记录`);
+      setChatReloadToken((value) => value + 1);
+    } catch (err) {
+      setPublishOpen(false);
+      applyError(err);
+    } finally {
+      setPublishing(false);
+    }
+  };
+
+  const validate = async () => {    if (!form) return;
     const payload = preparePayload();
     if (!payload) return;
     setError(null);
@@ -310,8 +354,23 @@ export function AgentEditorPage() {
           onChange={(event) => patch({ name: event.target.value })}
         />
         {dirty && <span className="text-[11px] text-warn whitespace-nowrap">未保存</span>}
+        <Link
+          className={`chip whitespace-nowrap ${meta.version > 0 ? "hover:border-primary hover:text-primary" : "!text-ink-3"}`}
+          to={`/versions?kind=agent&id=${id ?? ""}`}
+          title="查看该 Agent 的发布版本、配置快照与工具指纹"
+        >
+          {meta.version > 0 ? `v${meta.version}` : "未发布"}
+        </Link>
+        {meta.publishedHash && meta.draftHash !== meta.publishedHash && (
+          <span className="badge-yellow whitespace-nowrap" title="草稿与发布版不一致；对话仍使用当前保存的草稿">
+            有未发布改动
+          </span>
+        )}
         <div className="flex gap-1.5 ml-auto">
           <button className="btn !py-1" onClick={() => void validate()}><CheckCircle2 size={13} className="inline mr-1 -mt-0.5" />校验</button>
+          <button className="btn !py-1" onClick={() => setPublishOpen(true)}>
+            <Rocket size={13} className="inline mr-1 -mt-0.5" />发布版本
+          </button>
           <button className="btn-primary !py-1" disabled={saving} onClick={() => void save()}>
             <Save size={13} className="inline mr-1 -mt-0.5" />{saving ? "保存中…" : "保存"}
           </button>
@@ -577,6 +636,15 @@ export function AgentEditorPage() {
           </div>
         </aside>
       </div>
+
+      <PublishDialog
+        open={publishOpen}
+        title={`发布 ${form.name} 新版本`}
+        description="发布会生成不可变配置快照，并记录配置指纹、工具指纹与代码 commit；对话仍然使用当前保存的草稿。"
+        busy={publishing}
+        onClose={() => setPublishOpen(false)}
+        onConfirm={(versionName, note) => void publish(versionName, note)}
+      />
     </div>
   );
 }

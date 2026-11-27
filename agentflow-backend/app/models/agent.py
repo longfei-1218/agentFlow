@@ -78,6 +78,10 @@ class Agent(AgentCreate):
     id: str
     created_at: str
     updated_at: str
+    # 发布指针：0 表示从未发布；回滚会把指针指回历史版本，不会改动历史版本号
+    version: int = 0
+    draft_hash: str | None = None
+    published_hash: str | None = None
 
 
 class AgentValidationResult(CamelModel):

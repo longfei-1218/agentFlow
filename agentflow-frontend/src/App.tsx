@@ -11,6 +11,7 @@ import { McpPage } from "@/pages/McpPage";
 import { RunReplayPage } from "@/pages/RunReplayPage";
 import { RunsPage } from "@/pages/RunsPage";
 import { ToolsPage } from "@/pages/ToolsPage";
+import { VersionsPage } from "@/pages/VersionsPage";
 
 export default function App() {
   return (
@@ -26,6 +27,7 @@ export default function App() {
           <Route path="/flows/:id" element={<EditorPage />} />
           <Route path="/runs" element={<RunsPage />} />
           <Route path="/runs/:id" element={<RunReplayPage />} />
+          <Route path="/versions" element={<VersionsPage />} />
           <Route path="/tools" element={<ToolsPage />} />
           <Route path="/mcp" element={<McpPage />} />
           <Route path="/knowledge" element={<KnowledgePage />} />

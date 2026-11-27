@@ -155,8 +155,15 @@ export function RunsPage() {
                   </td>
                   <td className="px-3 py-2.5">
                     <span className={`badge ${run.targetType === "flow" ? "badge-blue" : "badge-cyan"}`}>
-                      {run.targetType === "flow" ? `Flow v${run.flowVersion}` : "Agent"}
+                      {run.targetType === "flow"
+                        ? `Flow v${run.targetVersion}`
+                        : run.targetVersion > 0
+                          ? `Agent v${run.targetVersion}`
+                          : "Agent"}
                     </span>
+                    {run.versionMode === "draft" && (
+                      <span className="badge-yellow ml-1" title="运行时使用的是未发布草稿">草稿</span>
+                    )}
                   </td>
                   <td className="px-3 py-2.5">
                     <span className={`badge ${STATUS_BADGE[run.status]}`}>{STATUS_TEXT[run.status]}</span>

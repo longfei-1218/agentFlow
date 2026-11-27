@@ -31,10 +31,16 @@ class Run(CamelModel):
     target_type: Literal["flow", "agent"] = "flow"
     target_id: str
     flow_version: int = 1
+    # 本次运行对应的发布版本（Agent 运行也记），0 = 从未发布
+    target_version: int = 0
+    # published = 当前保存内容与发布指针一致；draft = 跑的是未发布改动
+    version_mode: Literal["published", "draft"] = "published"
     status: RunStatus
     inputs: dict[str, Any] = Field(default_factory=dict)
     outputs: dict[str, Any] | None = None
     state: dict[str, Any] = Field(default_factory=dict)
+    # 运行期版本清单：配置指纹 / Agent 版本 / 工具指纹 / 代码 commit
+    manifest: dict[str, Any] = Field(default_factory=dict)
     error: str | None = None
     token_usage: int = 0
     cost_estimate: float = 0.0

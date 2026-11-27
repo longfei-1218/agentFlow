@@ -42,7 +42,7 @@ interface FlowStore {
   setRuntime: (id: string, state: RuntimeState) => void;
   validate: () => Promise<boolean>;
   save: () => Promise<void>;
-  publish: () => Promise<void>;
+  publish: (name: string, note?: string) => Promise<void>;
   toCreatePayload: () => FlowCreate;
 }
 
@@ -260,12 +260,12 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
     return queued;
   },
 
-  publish: async () => {
+  publish: async (name, note = "") => {
     const { flow } = get();
     if (!flow.id) return;
     // 保存冲突时直接抛给页面，不要把过期的 DSL 发布成新版本
     await get().save();
-    const published = await flowsApi.publish(flow.id);
+    const published = await flowsApi.publish(flow.id, { name, note });
     set({
       flow: published,
       dirty: false,

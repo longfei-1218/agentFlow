@@ -104,13 +104,22 @@ export function RunReplayPage() {
         <span className="chip font-mono">{run.id}</span>
         <span className={`badge ${STATUS_BADGE[status]}`}>{STATUS_TEXT[status]}</span>
         <span className={`badge ${run.targetType === "flow" ? "badge-blue" : "badge-cyan"}`}>
-          {run.targetType === "flow" ? "Flow" : "Agent"}
+          {run.targetType === "flow"
+            ? `Flow v${run.targetVersion}`
+            : run.targetVersion > 0
+              ? `Agent v${run.targetVersion}`
+              : "Agent"}
         </span>
+        {run.versionMode === "draft" && (
+          <span className="badge-yellow" title="运行时使用的是未发布草稿，评测默认不计入">
+            草稿运行
+          </span>
+        )}
         <button
           className="text-[12px] text-info hover:underline"
           onClick={() => navigate(run.targetType === "flow" ? `/flows/${run.targetId}` : `/agents/${run.targetId}`)}
         >
-          {run.targetId}{run.targetType === "flow" ? ` · v${run.flowVersion}` : ""}
+          {run.targetId}{` · v${run.targetVersion}`}
         </button>
         <span className="text-[12px] text-ink-3">共 {events.length} 个事件</span>
       </div>
@@ -128,6 +137,15 @@ export function RunReplayPage() {
           失败原因：{run.error}
         </div>
       )}
+
+      <details className="card p-4 mb-4">
+        <summary className="text-[12px] text-ink-2 cursor-pointer">
+          版本清单 · 配置指纹 {String((run.manifest as Record<string, unknown>)?.configHash ?? "—")}
+        </summary>
+        <pre className="text-[11px] whitespace-pre-wrap break-words bg-slate-50 border border-line rounded-sm p-2 mt-2 max-h-[240px] overflow-y-auto">
+          {JSON.stringify(run.manifest, null, 2)}
+        </pre>
+      </details>
 
       {status === "waiting_human" && (
         <div className="card border-violet/40 px-4 py-3 mb-4 flex items-center gap-3">

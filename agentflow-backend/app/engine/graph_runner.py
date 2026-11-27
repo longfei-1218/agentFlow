@@ -440,7 +440,18 @@ async def run_graph(
         state_json=dump_state(data),
     )
     await event_bus.emit(
-        run_id, "run_started", payload={"inputs": inputs, "engine": ENGINE_NAME}
+        run_id,
+        "run_started",
+        payload={
+            "inputs": inputs,
+            "engine": ENGINE_NAME,
+            "flowVersion": flow.version,
+            "versionMode": (
+                "published"
+                if flow.published_hash and flow.draft_hash == flow.published_hash
+                else "draft"
+            ),
+        },
     )
 
     if llm_config is None:

@@ -8,6 +8,7 @@ from app.database import db
 from app.engine.agent_runner import AgentRunError, run_agent
 from app.models.agent import Agent, AgentCreate
 from app.models.run import Run, RunStatus
+from app.services import run_manifest
 from app.services.agent_service import normalize_variables
 from app.services.event_bus import event_bus, utc_now
 from app.services.run_manager import run_manager
@@ -20,24 +21,32 @@ async def create_agent_run(
     *,
     conversation_id: str | None = None,
 ) -> Run:
+    manifest = await run_manifest.build_agent_run_manifest(agent)
+    mode = str(manifest.get("versionMode") or "draft")
     run = Run(
         id=f"run_{uuid.uuid4().hex[:8]}",
         target_type="agent",
         target_id=agent.id,
+        target_version=agent.version,
+        version_mode=mode,  # type: ignore[arg-type]
+        manifest=manifest,
         status=RunStatus.PENDING,
         inputs=variables,
         started_at=utc_now(),
         conversation_id=conversation_id,
     )
     await db.execute(
-        "INSERT INTO runs (id, target_type, target_id, flow_version, status, inputs_json, "
-        "state_json, token_usage, cost, started_at, conversation_id) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO runs (id, target_type, target_id, flow_version, target_version, version_mode, "
+        "manifest_json, status, inputs_json, state_json, token_usage, cost, started_at, conversation_id) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             run.id,
             run.target_type,
             run.target_id,
-            1,
+            run.flow_version,
+            run.target_version,
+            run.version_mode,
+            orjson.dumps(manifest).decode(),
             run.status.value,
             orjson.dumps(variables).decode(),
             "{}",
@@ -63,7 +72,17 @@ async def start_agent_run(
     await event_bus.emit(
         run_id,
         "run_started",
-        payload={"agentId": agent.id, "inputs": variables, "engine": "agent"},
+        payload={
+            "agentId": agent.id,
+            "agentVersion": agent.version,
+            "versionMode": (
+                "published"
+                if agent.published_hash and agent.draft_hash == agent.published_hash
+                else "draft"
+            ),
+            "inputs": variables,
+            "engine": "agent",
+        },
     )
 
     async def emit(event_type: str, payload: dict) -> None:

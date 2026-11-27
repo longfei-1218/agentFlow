@@ -49,9 +49,16 @@ export interface Agent {
   output: AgentOutput;
   createdAt: string;
   updatedAt: string;
+  /** 发布指针：0 = 从未发布；回滚会把指针指回历史版本，不改历史版本号 */
+  version: number;
+  draftHash: string | null;
+  publishedHash: string | null;
 }
 
-export type AgentPayload = Omit<Agent, "id" | "createdAt" | "updatedAt">;
+export type AgentPayload = Omit<
+  Agent,
+  "id" | "createdAt" | "updatedAt" | "version" | "draftHash" | "publishedHash"
+>;
 
 export interface AgentValidationIssue {
   nodeId?: string | null;

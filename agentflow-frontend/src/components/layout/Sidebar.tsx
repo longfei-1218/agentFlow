@@ -1,10 +1,11 @@
-import { Activity, Bot, Database, FlaskConical, GitBranch, Plug, Wrench } from "lucide-react";
+import { Activity, Bot, Database, FlaskConical, GitBranch, History, Plug, Wrench } from "lucide-react";
 import { NavLink } from "react-router-dom";
 
 const groups = [
   { title: "编排", items: [
     { to: "/agents", label: "Agent 库", icon: Bot },
     { to: "/flows", label: "流程编排", icon: GitBranch },
+    { to: "/versions", label: "版本管理", icon: History },
     { to: "/runs", label: "运行历史", icon: Activity },
   ] },
   { title: "资源", items: [

@@ -10,6 +10,7 @@ import { FlowCanvas } from "@/components/flow/FlowCanvas";
 import { Palette } from "@/components/flow/Palette";
 import { RunDrawer } from "@/components/flow/RunDrawer";
 import { RunInputsDialog } from "@/components/flow/RunInputsDialog";
+import { PublishDialog } from "@/components/versions/PublishDialog";
 import { useFlowEvents } from "@/hooks/useFlowEvents";
 import { useFlowStore } from "@/store/flowStore";
 import { useRunStore } from "@/store/runStore";
@@ -27,6 +28,8 @@ export function EditorPage() {
   const [actionError, setActionError] = useState<ActionError | null>(null);
   const [runOpen, setRunOpen] = useState(false);
   const [runBusy, setRunBusy] = useState(false);
+  const [publishOpen, setPublishOpen] = useState(false);
+  const [publishing, setPublishing] = useState(false);
 
   const flow = useFlowStore((s) => s.flow);
   const dirty = useFlowStore((s) => s.dirty);
@@ -133,11 +136,13 @@ export function EditorPage() {
     }
   }, [validate]);
 
-  const handlePublish = async () => {
+  const handlePublish = async (versionName: string, note: string) => {
     setActionError(null);
+    setPublishing(true);
     try {
-      await publish();
+      await publish(versionName, note);
       setIssueOpen(false);
+      setPublishOpen(false);
     } catch (error) {
       if (error instanceof ApiError) {
         setActionError({ message: error.message, issues: error.detail });
@@ -145,6 +150,8 @@ export function EditorPage() {
         return;
       }
       setActionError({ message: "发布失败", issues: [] });
+    } finally {
+      setPublishing(false);
     }
   };
 
@@ -192,8 +199,19 @@ export function EditorPage() {
           value={flow.name}
           onChange={(event) => rename(event.target.value)}
         />
-        <span className="chip" title="发布版本：只有发布才 +1，自动保存不会变动">v{flow.version}</span>
+        <button
+          className="chip hover:border-primary hover:text-primary"
+          title="查看版本历史：发布快照 / 配置指纹 / 工具指纹 / 代码 commit"
+          onClick={() => navigate(`/versions?kind=flow&id=${flow.id}`)}
+        >
+          v{flow.version}
+        </button>
         <span className="chip" title="当前流程 DSL 版本">DSL v{flow.dslVersion}</span>
+        {flow.publishedHash && flow.draftHash !== flow.publishedHash && (
+          <span className="badge-yellow" title="草稿与发布版不一致；运行仍使用当前保存的草稿">
+            有未发布改动
+          </span>
+        )}
         {!llmConfigured && (
           <button className="chip !text-warn !border-warn/40" onClick={openSettings} title="没有 API Key，含 Agent 节点的流程无法运行">
             未配置模型 · 点此设置
@@ -220,8 +238,8 @@ export function EditorPage() {
           <button className="btn" onClick={() => void save()}>
             <Save size={13} className="inline mr-1 -mt-0.5" />保存草稿
           </button>
-          <button className="btn-primary" onClick={() => void handlePublish()}>
-            <Rocket size={13} className="inline mr-1 -mt-0.5" />发布
+          <button className="btn-primary" onClick={() => setPublishOpen(true)}>
+            <Rocket size={13} className="inline mr-1 -mt-0.5" />发布版本
           </button>
         </div>
       </div>
@@ -292,6 +310,15 @@ export function EditorPage() {
         onCancel={() => void handleCancel()}
         onApprove={(approved) => void handleApprove(approved)}
         canRun={flow.dslVersion === 2 && (runStatus === "pending" || runStatus === "succeeded" || runStatus === "failed" || runStatus === "cancelled")}
+      />
+
+      <PublishDialog
+        open={publishOpen}
+        title={`发布 ${flow.name} 新版本`}
+        description="发布会绑定各 Agent 节点的当前发布版本，并记录配置指纹、工具指纹与代码 commit；运行仍然使用当前保存的草稿。"
+        busy={publishing}
+        onClose={() => setPublishOpen(false)}
+        onConfirm={(versionName, note) => void handlePublish(versionName, note)}
       />
     </div>
   );

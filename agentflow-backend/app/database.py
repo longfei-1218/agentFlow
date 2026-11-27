@@ -151,6 +151,42 @@ async def _migrate(conn: aiosqlite.Connection) -> None:
     # R5.1 对话模式：老库的 runs 没有会话归属，补列不删历史
     await _ensure_columns(conn, "runs", {"conversation_id": "TEXT"})
 
+    # R6.0 版本管理：草稿指纹 / 发布指针 / 运行期版本清单
+    await _ensure_columns(
+        conn,
+        "agents",
+        {
+            "published_version": "INTEGER NOT NULL DEFAULT 0",
+            "draft_hash": "TEXT",
+            "published_hash": "TEXT",
+        },
+    )
+    await _ensure_columns(
+        conn,
+        "flows",
+        {
+            "draft_hash": "TEXT",
+            "published_hash": "TEXT",
+        },
+    )
+    await _ensure_columns(
+        conn,
+        "runs",
+        {
+            "target_version": "INTEGER NOT NULL DEFAULT 0",
+            "version_mode": "TEXT NOT NULL DEFAULT 'published'",
+            "manifest_json": "TEXT",
+        },
+    )
+    # 版本名：发布时必填；老版本行留空，前端回退显示 vN
+    await _ensure_columns(conn, "agent_versions", {"name": "TEXT NOT NULL DEFAULT ''"})
+    await _ensure_columns(conn, "flow_versions", {"name": "TEXT NOT NULL DEFAULT ''"})
+    # 老 flow run 的发布版本就在 flow_version 列上，回填一次给统计用
+    await conn.execute(
+        "UPDATE runs SET target_version = flow_version "
+        "WHERE target_type = 'flow' AND target_version = 0 AND flow_version > 0"
+    )
+
 
 async def get_db() -> aiosqlite.Connection:
     """兼容旧调用：返回共享连接。写操作请改用 db.execute / db.transaction。"""
@@ -159,3 +195,7 @@ async def get_db() -> aiosqlite.Connection:
 
 async def init_db() -> None:
     await db.connect()
+    # 版本表就绪后再登记老数据基线；这里延迟导入，避免 database ↔ version_repo 循环
+    from app.services.version_repo import backfill_baselines
+
+    await backfill_baselines()

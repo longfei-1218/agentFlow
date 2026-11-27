@@ -4,7 +4,11 @@
 CREATE TABLE IF NOT EXISTS flows (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
+    -- version = 发布指针：回滚会把它指回历史版本，发布永远按 MAX(version)+1 追加
     version INTEGER NOT NULL DEFAULT 1,
+    -- 冗余缓存：草稿指纹 / 发布指纹，列表页判断「是否有未发布改动」
+    draft_hash TEXT,
+    published_hash TEXT,
     dsl_json TEXT NOT NULL,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
@@ -15,7 +19,14 @@ CREATE TABLE IF NOT EXISTS runs (
     -- v2：flow | agent；target_id 分别对应 flows.id / agents.id
     target_type TEXT NOT NULL DEFAULT 'flow',
     target_id TEXT NOT NULL,
+    -- 兼容保留：flow 运行时的发布版本
     flow_version INTEGER NOT NULL DEFAULT 1,
+    -- 运行实际对应的发布版本（agent 运行也填），0 表示从未发布
+    target_version INTEGER NOT NULL DEFAULT 0,
+    -- published = 当前保存内容与发布指针一致；draft = 跑的是未发布改动
+    version_mode TEXT NOT NULL DEFAULT 'published',
+    -- 运行期版本清单：配置指纹 / Agent 版本 / 工具指纹 / 代码 commit
+    manifest_json TEXT,
     status TEXT NOT NULL,
     inputs_json TEXT NOT NULL,
     outputs_json TEXT,
@@ -193,9 +204,51 @@ CREATE TABLE IF NOT EXISTS agents (
     name TEXT NOT NULL,
     description TEXT NOT NULL DEFAULT '',
     definition_json TEXT NOT NULL,
+    -- published_version 是发布指针；0 表示还没发布过
+    published_version INTEGER NOT NULL DEFAULT 0,
+    draft_hash TEXT,
+    published_hash TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_agents_updated ON agents(updated_at DESC);
+
+-- R6.0 版本层：只追加、不可变；草稿层被覆盖不影响这里的快照
+CREATE TABLE IF NOT EXISTS agent_versions (
+    id TEXT PRIMARY KEY,
+    agent_id TEXT NOT NULL,
+    version INTEGER NOT NULL,
+    config_hash TEXT NOT NULL,
+    bundle_hash TEXT NOT NULL,
+    snapshot_json TEXT NOT NULL,
+    manifest_json TEXT NOT NULL,
+    code_commit TEXT,
+    code_dirty INTEGER NOT NULL DEFAULT 0,
+    name TEXT NOT NULL DEFAULT '',
+    note TEXT NOT NULL DEFAULT '',
+    restored_from INTEGER,
+    created_at TEXT NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_agent_versions ON agent_versions(agent_id, version);
+
+CREATE TABLE IF NOT EXISTS flow_versions (
+    id TEXT PRIMARY KEY,
+    flow_id TEXT NOT NULL,
+    version INTEGER NOT NULL,
+    config_hash TEXT NOT NULL,
+    bundle_hash TEXT NOT NULL,
+    snapshot_json TEXT NOT NULL,
+    manifest_json TEXT NOT NULL,
+    code_commit TEXT,
+    code_dirty INTEGER NOT NULL DEFAULT 0,
+    name TEXT NOT NULL DEFAULT '',
+    note TEXT NOT NULL DEFAULT '',
+    restored_from INTEGER,
+    created_at TEXT NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_flow_versions ON flow_versions(flow_id, version);
+
 

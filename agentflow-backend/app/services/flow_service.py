@@ -7,6 +7,7 @@ from collections import deque
 from typing import Any
 
 from app.models.flow import Flow, ValidationIssue, ValidationResult
+from app.models.agent import AgentCreate
 from app.nodes.registry import validate_config
 from app.services import agent_repo
 from app.services.flow_vars import extract_paths
@@ -105,7 +106,14 @@ def validate_flow(flow: Flow) -> ValidationResult:
     return ValidationResult(valid=not errors, errors=errors)
 
 
-async def validate_flow_runtime(flow: Flow) -> ValidationResult:
+async def validate_flow_runtime(
+    flow: Flow, *, agents_by_node: dict[str, "AgentCreate"] | None = None
+) -> ValidationResult:
+    """结构校验 + Agent 绑定校验。
+
+    `agents_by_node` 用于「发布时按已绑定的 Agent 发布快照校验」：
+    否则草稿里改了变量、inputMap 却还停在旧结构，发布出去就是一个跑不动的流程。
+    """
     result = validate_flow(flow)
     if not result.valid:
         return result
@@ -122,14 +130,20 @@ async def validate_flow_runtime(flow: Flow) -> ValidationResult:
             continue
         config = node.config or {}
         agent_id = str(_cfg(config, "agent_id", "agentId", "") or "")
-        try:
-            agent = await agent_repo.get_agent(agent_id)
-        except agent_repo.AgentNotFound:
-            errors.append(_issue(node.id, f"引用的 Agent 不存在: {agent_id}"))
-            continue
-        except Exception as exc:  # noqa: BLE001
-            errors.append(_issue(node.id, f"读取 Agent 失败: {exc}"))
-            continue
+        if agents_by_node is not None:
+            agent = agents_by_node.get(node.id)
+            if agent is None:
+                errors.append(_issue(node.id, f"该节点没有绑定 Agent 发布版本: {agent_id}"))
+                continue
+        else:
+            try:
+                agent = await agent_repo.get_agent(agent_id)
+            except agent_repo.AgentNotFound:
+                errors.append(_issue(node.id, f"引用的 Agent 不存在: {agent_id}"))
+                continue
+            except Exception as exc:  # noqa: BLE001
+                errors.append(_issue(node.id, f"读取 Agent 失败: {exc}"))
+                continue
 
         input_map = _cfg(config, "input_map", "inputMap", {}) or {}
         if not isinstance(input_map, dict):
