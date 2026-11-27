@@ -21,7 +21,6 @@ const titles: Record<string, string> = {
 const ENGINE_LABEL: Record<string, string> = {
   graph: "LangGraph",
   loop: "手写 Loop",
-  demo: "演示桩",
 };
 
 export function Topbar() {

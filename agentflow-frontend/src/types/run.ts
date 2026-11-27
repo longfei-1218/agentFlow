@@ -23,7 +23,6 @@ export interface Run {
   id: string;
   targetType: RunTargetType;
   targetId: string;
-  flowVersion: number;
   /** 本次运行对应的发布版本（Agent 运行也记），0 = 从未发布 */
   targetVersion: number;
   /** published = 当前保存内容与发布指针一致；draft = 跑了未发布改动 */

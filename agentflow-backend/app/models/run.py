@@ -30,7 +30,6 @@ class Run(CamelModel):
     id: str
     target_type: Literal["flow", "agent"] = "flow"
     target_id: str
-    flow_version: int = 1
     # 本次运行对应的发布版本（Agent 运行也记），0 = 从未发布
     target_version: int = 0
     # published = 当前保存内容与发布指针一致；draft = 跑的是未发布改动

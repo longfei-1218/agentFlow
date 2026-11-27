@@ -1,5 +1,5 @@
 -- AgentFlow Studio 表结构（按可迁移设计，不用 SQLite 专有语法）
--- 已启用：flows / runs / run_events / settings / tools / tool_invocations / mcp_servers / 知识库 / conversations / chat_turns；其余表先建好，避免后续迁移。
+-- 已启用：flows / runs / run_events / settings / tools / tool_invocations / mcp_servers / 知识库 / conversations / chat_turns / agents / 版本表
 
 CREATE TABLE IF NOT EXISTS flows (
     id TEXT PRIMARY KEY,
@@ -19,8 +19,6 @@ CREATE TABLE IF NOT EXISTS runs (
     -- v2：flow | agent；target_id 分别对应 flows.id / agents.id
     target_type TEXT NOT NULL DEFAULT 'flow',
     target_id TEXT NOT NULL,
-    -- 兼容保留：flow 运行时的发布版本
-    flow_version INTEGER NOT NULL DEFAULT 1,
     -- 运行实际对应的发布版本（agent 运行也填），0 表示从未发布
     target_version INTEGER NOT NULL DEFAULT 0,
     -- published = 当前保存内容与发布指针一致；draft = 跑的是未发布改动
@@ -62,12 +60,8 @@ CREATE TABLE IF NOT EXISTS settings (
 CREATE TABLE IF NOT EXISTS tools (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL UNIQUE,
-    kind TEXT NOT NULL,
-    schema_json TEXT NOT NULL,
-    endpoint TEXT,
-    risk TEXT NOT NULL DEFAULT 'low',
     enabled INTEGER NOT NULL DEFAULT 1,
-    -- 整份 ToolDef（含 method/headers/body/超时/重试/幂等）都在这里，上面几列只是便于筛选的冗余
+    -- 整份 ToolDef（含 kind/schema/endpoint/risk/method/headers/body/超时/重试/幂等）都在这里
     definition_json TEXT,
     created_at TEXT,
     updated_at TEXT
@@ -97,10 +91,8 @@ CREATE INDEX IF NOT EXISTS idx_inv_idem ON tool_invocations(idem_key, created_at
 CREATE TABLE IF NOT EXISTS mcp_servers (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL UNIQUE,
-    transport TEXT NOT NULL,
-    command_or_url TEXT NOT NULL,
     enabled INTEGER NOT NULL DEFAULT 1,
-    -- 整份 MCPServerDef（含 args/env/cwd/timeout）在这里，上面几列只是列表页冗余
+    -- 整份 MCPServerDef（含 transport/args/env/cwd/timeout）都在这里
     definition_json TEXT,
     created_at TEXT,
     updated_at TEXT
@@ -149,29 +141,7 @@ CREATE TABLE IF NOT EXISTS eval_sets (
     created_at TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS eval_results (
-    id TEXT PRIMARY KEY,
-    set_id TEXT NOT NULL,
-    flow_version INTEGER NOT NULL,
-    metrics_json TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    FOREIGN KEY (set_id) REFERENCES eval_sets(id)
-);
-
-CREATE TABLE IF NOT EXISTS eval_trials (
-    result_id TEXT NOT NULL,
-    case_id TEXT NOT NULL,
-    trial INTEGER NOT NULL,
-    outcome_ok INTEGER NOT NULL,
-    tool_ok INTEGER NOT NULL,
-    judge_score REAL,
-    steps INTEGER NOT NULL,
-    tokens INTEGER NOT NULL,
-    cost REAL NOT NULL,
-    trace_ref TEXT,
-    PRIMARY KEY (result_id, case_id, trial),
-    FOREIGN KEY (result_id) REFERENCES eval_results(id)
-);
+-- R6 质量体系落地时再按实际指标重建 eval_results / eval_trials
 
 -- R5.1 对话模式：一个会话绑定一个流程；助手回复不单独落表，按 run_id 从 runs 还原
 CREATE TABLE IF NOT EXISTS conversations (

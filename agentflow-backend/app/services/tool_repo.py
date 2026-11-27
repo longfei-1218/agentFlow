@@ -1,8 +1,7 @@
 """工具注册表与调用记录的存取（R3）。
 
-存储形态：`tools.definition_json` 存整份 ToolDef（含 timeout/retry/幂等等执行参数），
-另外把 name/kind/params_schema/endpoint/risk/enabled 冗余成列，方便列表页 SQL 排序筛选；
-冗余列只从 definition 反推，绝不单独维护，避免两套真相。
+存储形态：`tools.definition_json` 存整份 ToolDef（含 timeout/retry/幂等等执行参数）。
+`name` 只用于唯一约束与冲突检查，`enabled` 只用于列表过滤；不再维护第二份配置列。
 """
 from typing import Any
 
@@ -13,10 +12,7 @@ from app.models.tool import BUILTIN_SCHEMAS, ToolCreate, ToolDef, ToolInvocation
 from app.resources import catalog
 from app.services.event_bus import utc_now
 
-COLS = (
-    "id, name, kind, schema_json, endpoint, risk, enabled, "
-    "definition_json, created_at, updated_at"
-)
+COLS = "id, name, enabled, definition_json, created_at, updated_at"
 
 
 class ToolNotFound(LookupError):
@@ -28,20 +24,7 @@ class ToolNameConflict(ValueError):
 
 
 def _row_to_tool(row) -> ToolDef:
-    if row["definition_json"]:
-        return ToolDef.model_validate(orjson.loads(row["definition_json"]))
-    # 兼容旧 `tools` 表里手写的历史行（只有列没有 definition）
-    return ToolDef(
-        id=row["id"],
-        name=row["name"],
-        kind=row["kind"],
-        params_schema=orjson.loads(row["schema_json"] or "{}"),
-        url=row["endpoint"] or "",
-        risk=row["risk"],
-        enabled=bool(row["enabled"]),
-        created_at=row["created_at"],
-        updated_at=row["updated_at"],
-    )
+    return ToolDef.model_validate(orjson.loads(row["definition_json"]))
 
 
 def _normalize(payload: ToolCreate) -> ToolCreate:
@@ -103,14 +86,10 @@ async def create_tool(payload: ToolCreate) -> ToolDef:
     tool.created_at = now
     tool.updated_at = now
     await db.execute(
-        f"INSERT INTO tools ({COLS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        f"INSERT INTO tools ({COLS}) VALUES (?, ?, ?, ?, ?, ?)",
         (
             tool.id,
             tool.name,
-            tool.kind,
-            orjson.dumps(tool.params_schema).decode(),
-            tool.url or None,
-            tool.risk,
             int(tool.enabled),
             orjson.dumps(tool.model_dump()).decode(),
             now,
@@ -132,14 +111,9 @@ async def update_tool(tool_id: str, payload: ToolCreate) -> ToolDef:
     tool.created_at = existing.created_at
     tool.updated_at = utc_now()
     await db.execute(
-        "UPDATE tools SET name = ?, kind = ?, schema_json = ?, endpoint = ?, risk = ?, "
-        "enabled = ?, definition_json = ?, updated_at = ? WHERE id = ?",
+        "UPDATE tools SET name = ?, enabled = ?, definition_json = ?, updated_at = ? WHERE id = ?",
         (
             tool.name,
-            tool.kind,
-            orjson.dumps(tool.params_schema).decode(),
-            tool.url or None,
-            tool.risk,
             int(tool.enabled),
             orjson.dumps(tool.model_dump()).decode(),
             tool.updated_at,

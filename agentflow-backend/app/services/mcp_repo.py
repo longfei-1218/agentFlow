@@ -1,7 +1,7 @@
 """MCP Server 注册表存取（R5）。
 
-和 tools 一样的两层存储：`definition_json` 是唯一真相，`name/transport/command_or_url/enabled`
-这些列只是给列表页排序筛选用的冗余。改配置只改 definition，再回填冗余列。
+`definition_json` 是唯一真相；表内只保留 name / enabled 两列供唯一约束与列表过滤，
+transport / command_or_url 不再单独冗余。
 """
 import orjson
 
@@ -9,7 +9,7 @@ from app.database import db
 from app.models.mcp import MCPServerCreate, MCPServerDef
 from app.services.event_bus import utc_now
 
-COLS = "id, name, transport, command_or_url, enabled, definition_json, created_at, updated_at"
+COLS = "id, name, enabled, definition_json, created_at, updated_at"
 
 
 class MCPServerNotFound(LookupError):
@@ -21,17 +21,7 @@ class MCPNameConflict(ValueError):
 
 
 def _row_to_server(row) -> MCPServerDef:
-    if row["definition_json"]:
-        return MCPServerDef.model_validate(orjson.loads(row["definition_json"]))
-    return MCPServerDef(
-        id=row["id"],
-        name=row["name"],
-        transport=row["transport"],
-        command=row["command_or_url"],
-        enabled=bool(row["enabled"]),
-        created_at=row["created_at"],
-        updated_at=row["updated_at"],
-    )
+    return MCPServerDef.model_validate(orjson.loads(row["definition_json"]))
 
 
 async def list_servers(*, only_enabled: bool = False) -> list[MCPServerDef]:
@@ -63,12 +53,10 @@ async def create_server(payload: MCPServerCreate) -> MCPServerDef:
     server.created_at = now
     server.updated_at = now
     await db.execute(
-        f"INSERT INTO mcp_servers ({COLS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        f"INSERT INTO mcp_servers ({COLS}) VALUES (?, ?, ?, ?, ?, ?)",
         (
             server.id,
             server.name,
-            server.transport,
-            server.command,
             int(server.enabled),
             orjson.dumps(server.model_dump(mode="json")).decode(),
             now,
@@ -89,12 +77,10 @@ async def update_server(server_id: str, payload: MCPServerCreate) -> MCPServerDe
     server.created_at = existing.created_at
     server.updated_at = utc_now()
     await db.execute(
-        "UPDATE mcp_servers SET name = ?, transport = ?, command_or_url = ?, enabled = ?, "
-        "definition_json = ?, updated_at = ? WHERE id = ?",
+        "UPDATE mcp_servers SET name = ?, enabled = ?, definition_json = ?, updated_at = ? "
+        "WHERE id = ?",
         (
             server.name,
-            server.transport,
-            server.command,
             int(server.enabled),
             orjson.dumps(server.model_dump(mode="json")).decode(),
             server.updated_at,

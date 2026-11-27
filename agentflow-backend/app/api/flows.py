@@ -318,7 +318,6 @@ async def start_run(flow_id: str, payload: dict | None = None):
         id=f"run_{uuid.uuid4().hex[:8]}",
         target_type="flow",
         target_id=flow_id,
-        flow_version=flow.version,
         target_version=flow.version,
         version_mode=mode,  # type: ignore[arg-type]
         manifest=manifest,
@@ -327,14 +326,13 @@ async def start_run(flow_id: str, payload: dict | None = None):
         started_at=utc_now(),
     )
     await db.execute(
-        "INSERT INTO runs (id, target_type, target_id, flow_version, target_version, version_mode, "
+        "INSERT INTO runs (id, target_type, target_id, target_version, version_mode, "
         "manifest_json, status, inputs_json, state_json, token_usage, cost, started_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             run.id,
             run.target_type,
             run.target_id,
-            run.flow_version,
             run.target_version,
             run.version_mode,
             orjson.dumps(manifest).decode(),

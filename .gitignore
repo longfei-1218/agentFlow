@@ -4,6 +4,5 @@ agentflow-backend/data/artifacts/
 # 用户导入的 MCP / 工具包和知识库文件
 agentflow-backend/data/resources/
 
-# 本地后端日志
-agentflow-backend/backend.log
-agentflow-backend/backend.err.log
+# 本地后端日志（全部忽略，包括 data/ 与 uvicorn 重定向日志）
+agentflow-backend/**/*.log

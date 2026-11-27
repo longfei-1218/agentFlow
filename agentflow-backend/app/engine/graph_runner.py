@@ -445,7 +445,6 @@ async def run_graph(
         payload={
             "inputs": inputs,
             "engine": ENGINE_NAME,
-            "flowVersion": flow.version,
             "versionMode": (
                 "published"
                 if flow.published_hash and flow.draft_hash == flow.published_hash

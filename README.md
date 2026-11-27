@@ -2,7 +2,7 @@
 
 本地单用户 Web 端 Agent 编排平台。全局 Agent 库定义提示词、变量、模型、工具 / MCP / 知识库；Flow v2 只用六类编排节点引用 Agent，运行过程通过 SSE 实时展示 token、工具调用、审批与指标。
 
-当前状态：**Flow v2 + 前端切换 + 步骤 5 收尾已完成**。后端 70 条测试通过，前端 `tsc --noEmit` 与 `vite build` 通过，真实 DeepSeek 网关已跑通单 Agent、知识库 Agent、零变量 Agent 和两 Agent 串联。
+当前状态：**Flow v2 + 前端切换 + 步骤 5 收尾已完成**。后端 81 条测试通过，前端 `tsc --noEmit` 与 `vite build` 通过，真实 DeepSeek 网关已跑通单 Agent、知识库 Agent、零变量 Agent 和两 Agent 串联。
 
 ---
 

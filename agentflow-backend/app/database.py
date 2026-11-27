@@ -8,6 +8,8 @@
   这也是改成共享连接的直接原因。
 """
 import asyncio
+import json
+import sqlite3
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import AsyncIterator
@@ -95,20 +97,93 @@ class Database:
 db = Database()
 
 
+async def _column_names(conn: aiosqlite.Connection, table: str) -> set[str]:
+    cursor = await conn.execute(f"PRAGMA table_info({table})")
+    try:
+        return {row[1] for row in await cursor.fetchall()}
+    finally:
+        await cursor.close()
+
+
 async def _ensure_columns(
     conn: aiosqlite.Connection, table: str, additions: dict[str, str]
 ) -> set[str]:
     """给已存在的老表补列，返回「补列之前」的列名集合（用于判断要不要回填数据）。"""
-    cursor = await conn.execute(f"PRAGMA table_info({table})")
-    try:
-        existing = {row[1] for row in await cursor.fetchall()}
-    finally:
-        await cursor.close()
+    existing = await _column_names(conn, table)
 
     for name, ddl in additions.items():
         if name not in existing:
             await conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
     return existing
+
+
+async def _drop_columns(conn: aiosqlite.Connection, table: str, columns: set[str]) -> None:
+    """删除历史冗余列；SQLite 3.35+ 才支持 DROP COLUMN。"""
+    if sqlite3.sqlite_version_info < (3, 35, 0):
+        return
+    existing = await _column_names(conn, table)
+    for name in columns:
+        if name in existing:
+            await conn.execute(f"ALTER TABLE {table} DROP COLUMN {name}")
+
+
+async def _backfill_legacy_resource_definitions(conn: aiosqlite.Connection) -> None:
+    """删除冗余列之前，把只有列、没有 definition_json 的历史行补成完整定义。
+
+    正常库（R3+ 之后）definition_json 都有值；这里只兜底极老的手写行。
+    """
+    tool_columns = await _column_names(conn, "tools")
+    if {"definition_json", "schema_json"} <= tool_columns:
+        cursor = await conn.execute(
+            "SELECT id, name, kind, schema_json, endpoint, risk, enabled, created_at, updated_at "
+            "FROM tools WHERE definition_json IS NULL"
+        )
+        try:
+            rows = await cursor.fetchall()
+        finally:
+            await cursor.close()
+        for row in rows:
+            payload = {
+                "id": row[0],
+                "name": row[1],
+                "kind": row[2],
+                "params_schema": json.loads(row[3] or "{}"),
+                "url": row[4] or "",
+                "risk": row[5],
+                "enabled": bool(row[6]),
+                "created_at": row[7],
+                "updated_at": row[8],
+            }
+            await conn.execute(
+                "UPDATE tools SET definition_json = ? WHERE id = ?",
+                (json.dumps(payload, ensure_ascii=False), row[0]),
+            )
+
+    mcp_columns = await _column_names(conn, "mcp_servers")
+    if {"definition_json", "transport", "command_or_url"} <= mcp_columns:
+        cursor = await conn.execute(
+            "SELECT id, name, transport, command_or_url, enabled, created_at, updated_at "
+            "FROM mcp_servers WHERE definition_json IS NULL"
+        )
+        try:
+            rows = await cursor.fetchall()
+        finally:
+            await cursor.close()
+        for row in rows:
+            payload = {
+                "id": row[0],
+                "name": row[1],
+                "transport": row[2],
+                "command": "" if row[2] == "http" else (row[3] or ""),
+                "url": (row[3] or "") if row[2] == "http" else "",
+                "enabled": bool(row[4]),
+                "created_at": row[5],
+                "updated_at": row[6],
+            }
+            await conn.execute(
+                "UPDATE mcp_servers SET definition_json = ? WHERE id = ?",
+                (json.dumps(payload, ensure_ascii=False), row[0]),
+            )
 
 
 async def _migrate(conn: aiosqlite.Connection) -> None:
@@ -181,16 +256,24 @@ async def _migrate(conn: aiosqlite.Connection) -> None:
     # 版本名：发布时必填；老版本行留空，前端回退显示 vN
     await _ensure_columns(conn, "agent_versions", {"name": "TEXT NOT NULL DEFAULT ''"})
     await _ensure_columns(conn, "flow_versions", {"name": "TEXT NOT NULL DEFAULT ''"})
-    # 老 flow run 的发布版本就在 flow_version 列上，回填一次给统计用
-    await conn.execute(
-        "UPDATE runs SET target_version = flow_version "
-        "WHERE target_type = 'flow' AND target_version = 0 AND flow_version > 0"
-    )
 
+    # 清理两次架构变迁留下的冗余：run 旧版本列、资源表只写不查的列、两张空评测表
+    runs_columns = await _column_names(conn, "runs")
+    if "flow_version" in runs_columns:
+        # 先把老 flow run 的发布版本回填到 target_version，再物理删列
+        await conn.execute(
+            "UPDATE runs SET target_version = flow_version "
+            "WHERE target_type = 'flow' AND target_version = 0 AND flow_version > 0"
+        )
+        await _drop_columns(conn, "runs", {"flow_version"})
 
-async def get_db() -> aiosqlite.Connection:
-    """兼容旧调用：返回共享连接。写操作请改用 db.execute / db.transaction。"""
-    return db.conn
+    await _backfill_legacy_resource_definitions(conn)
+    await _drop_columns(conn, "tools", {"kind", "schema_json", "endpoint", "risk"})
+    await _drop_columns(conn, "mcp_servers", {"transport", "command_or_url"})
+
+    # eval_results / eval_trials 零数据、零读写；R6 按实际指标重建
+    await conn.execute("DROP TABLE IF EXISTS eval_trials")
+    await conn.execute("DROP TABLE IF EXISTS eval_results")
 
 
 async def init_db() -> None:

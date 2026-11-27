@@ -42,7 +42,7 @@ export interface NodeTypesPayload {
   /** R5：MCP Server / 知识库数量，配置面板下拉为空时引导去对应页面 */
   mcpServersCount?: number;
   knowledgeBasesCount?: number;
-  /** 当前执行引擎：graph = LangGraph（R4 默认），loop = 手写 Agent Loop，demo = 确定性桩 */
+  /** 当前执行引擎：graph = LangGraph（默认），loop = 手写 Agent Loop（旧 DSL 对照） */
   engine?: string;
   engines?: string[];
 }

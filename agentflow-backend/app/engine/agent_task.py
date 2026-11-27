@@ -36,14 +36,13 @@ async def create_agent_run(
         conversation_id=conversation_id,
     )
     await db.execute(
-        "INSERT INTO runs (id, target_type, target_id, flow_version, target_version, version_mode, "
+        "INSERT INTO runs (id, target_type, target_id, target_version, version_mode, "
         "manifest_json, status, inputs_json, state_json, token_usage, cost, started_at, conversation_id) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             run.id,
             run.target_type,
             run.target_id,
-            run.flow_version,
             run.target_version,
             run.version_mode,
             orjson.dumps(manifest).decode(),

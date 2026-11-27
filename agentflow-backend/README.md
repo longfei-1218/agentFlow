@@ -1,6 +1,6 @@
 # AgentFlow Studio · 后端
 
-FastAPI + aiosqlite + sse-starlette + httpx + LangGraph。当前是 **Flow v2**：全局 Agent 库 + 六类编排节点 + Agent 作用域对话；步骤 5 已收尾，后端 70 条测试通过。
+FastAPI + aiosqlite + sse-starlette + httpx + LangGraph。当前是 **Flow v2**：全局 Agent 库 + 六类编排节点 + Agent 作用域对话；步骤 5 已收尾，后端 81 条测试通过。
 
 ## 已实现
 
@@ -20,7 +20,7 @@ FastAPI + aiosqlite + sse-starlette + httpx + LangGraph。当前是 **Flow v2**�
 - `app/services/flow_vars.py` 负责点路径模板；`app/engine/expr.py` 的 condition/loop 表达式同样支持点路径。
 - `app/services/flow_service.py`：结构校验（start/end 唯一、condition true/false、loop body、孤立节点、环检测）＋运行期校验（Agent 存在、inputMap 键属于 Agent 变量、必选变量已映射、变量路径可解析）。必填变量没映射返回 `FLOW_INVALID` 并带 `nodeId`。
 - `app/engine/graph_runner.py`：v2 流程走 LangGraph；`start` 注入 `inputs`，`agent` 调 `AgentRunner`，`end` 解析 outputs；condition/loop/human 保留编排语义。checkpoint 独立到 `data/agentflow_checkpoints.db`，业务库 `PRAGMA busy_timeout=5000`。
-- `runs` 使用 `target_type = flow|agent` + `target_id` + `flow_version`；`GET /api/runs?flow_id=/agent_id=/target_type=/target_id=`；resume 仅允许 flow。
+- `runs` 使用 `target_type = flow|agent` + `target_id` + `target_version` + `version_mode` + `manifest_json`；`GET /api/runs?flow_id=/agent_id=/target_type=/target_id=`；resume 仅允许 flow。
 
 ### 对话
 
@@ -57,7 +57,7 @@ cd agentflow-backend
 .venv\Scripts\python.exe -m pytest
 ```
 
-期望 **70 passed**，覆盖：
+期望 **81 passed**，覆盖：
 
 - Flow v2 默认 start/end、六类节点 Schema、结构校验、condition 分支、loop、human 暂停/批准/取消、旧 DSL `FLOW_DSL_LEGACY`；
 - Agent CRUD、零变量 Agent 保存与对话、变量渲染、`@tool` 强制、输出 Schema 重试、空回答、Agent 异步 run + SSE；
@@ -79,4 +79,4 @@ cd agentflow-backend
 - 旧 DSL 只能回放，不能编辑、发布、校验或运行。
 - 实时引用无版本锁，改 Agent 立即影响引用流程。
 - 对话记忆是硬截断，不做摘要或向量检索。
-- 旧的 demo / loop 执行代码仍留在仓库作离线对照，但 v2 API 只接受 `dslVersion=2`，正常入口走 LangGraph。
+- 旧的 demo 执行代码已删除；R2 手写 loop 仍保留作旧 DSL 对照，但 v2 API 只接受 `dslVersion=2`，正常入口走 LangGraph。

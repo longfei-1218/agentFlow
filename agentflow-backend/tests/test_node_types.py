@@ -19,7 +19,7 @@ async def test_node_types_exposes_six_v2_schemas(client):
         assert types[node_type]["implemented"] is True, node_type
 
     assert data["engine"] in {"graph", "loop"}
-    assert {"graph", "loop", "demo"} <= set(data["engines"])
+    assert set(data["engines"]) == {"graph", "loop"}
     assert data["llmConfigured"] is True
 
 

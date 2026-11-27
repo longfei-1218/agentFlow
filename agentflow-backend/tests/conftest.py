@@ -74,9 +74,3 @@ def stub_llm(monkeypatch):
         )
 
     monkeypatch.setattr("app.engine.loop.stream_completion", fake_stream)
-
-
-@pytest.fixture
-def slow_demo(monkeypatch):
-    """把节点间停顿调大，方便在取消/审批之间插入断言。"""
-    monkeypatch.setattr(settings, "DEMO_STEP_DELAY", 0.35)
