@@ -50,7 +50,13 @@ async def create_agent_run(
     return run
 
 
-async def start_agent_run(run_id: str, agent: Agent, variables: dict) -> None:
+async def start_agent_run(
+    run_id: str,
+    agent: Agent,
+    variables: dict,
+    *,
+    chat_text: str | None = None,
+) -> None:
     await update_run(
         run_id, status=RunStatus.RUNNING.value, started_at=utc_now()
     )
@@ -72,6 +78,7 @@ async def start_agent_run(run_id: str, agent: Agent, variables: dict) -> None:
             variables,
             emit=emit,
             stop=lambda: run_manager.is_cancelled(run_id),
+            chat_text=chat_text,
         )
     except AgentRunError as exc:
         await event_bus.emit(

@@ -1,301 +1,143 @@
 ﻿# agentFlow · AgentFlow Studio
 
-Web 端 Agent 编排平台（本地单用户原型）：画布拖拽定义执行拓扑 → 右侧配置参数 → 运行并实时观测 token / 工具调用 / 中间结果 → 用评测集做回归。
+本地单用户 Web 端 Agent 编排平台。全局 Agent 库定义提示词、变量、模型、工具 / MCP / 知识库；Flow v2 只用六类编排节点引用 Agent，运行过程通过 SSE 实时展示 token、工具调用、审批与指标。
 
-**当前进度：R5 + R5.1 完成**（MCP stdio 客户端、知识库 BM25 检索、子流程内联；对话模式让单个流程以聊天方式连续跑）。
-下一步 R6：评测体系 + Docker 部署 + 评测页。
+当前状态：**Flow v2 + 前端切换 + 步骤 5 收尾已完成**。后端 60 条测试通过，前端 `tsc --noEmit` 与 `vite build` 通过，真实 DeepSeek 网关已跑通单 Agent、知识库 Agent、零变量 Agent 和两 Agent 串联。
 
 ---
 
 ## 目录
 
-```
+```text
+agentflow-backend/    FastAPI + SQLite + LangGraph
+agentflow-frontend/   React + TypeScript + Vite + React Flow
 docs/
-  agent-orchestrator-tech-design.md   技术设计 v1.1（数据模型 / API / 评测体系）
-  agentflow-studio-ui.html            前端 UI 静态稿（浏览器直接打开，6 页可切换）
-  backend-implementation-guide.md     后端实现步骤（P1–P5）
-  frontend-implementation-guide.md    前端实现步骤（P1–P5）
-  acceptance.md                       每轮验收清单（命令 + 期望结果）
-agentflow-backend/                    FastAPI + SQLite + SSE 后端
-  app/nodes/registry.py               11 类节点的配置模型（JSON Schema 的唯一定义处）
-  app/engine/loop.py                  手写 Agent Loop（真调模型 + MAX_STEPS 守卫）
-  app/engine/extra_nodes.py           MCP / 知识 / 子流程三类节点
-  app/services/mcp_client.py           MCP stdio 客户端（Popen + JSON-RPC）
-  app/services/knowledge_rag.py        切块 + BM25 + MMR
-  scripts/mcp_demo_server.py           最小 MCP stdio server（echo/add/now）
-  tools/fake_llm.py                   本地假模型（OpenAI 兼容，仅离线验收用）
-agentflow-frontend/                   React + TS + Vite + React Flow 前端
+  agent-refactor-plan.md    v2 最终实施记录与边界
+  acceptance.md             v2 验收命令与检查表
 ```
 
 ---
 
-## 环境要求
+## 核心口径
 
-| 项 | 版本 | 说明 |
-|---|---|---|
-| Python | 3.10+（实测 3.10.10 与 3.13.18 均通过） | 后端 |
-| Node.js | 18+ | 前端，`npm` 随装 |
-| 端口 | 8000 / 5173 | 后端 / 前端 dev |
+- **Agent 是全局可复用资源**：`AgentCreate {name, description, variables, prompt{system,template}, resources, model, output}`。流程节点只存 `agentId`，不做版本锁，改 Agent 立即影响引用它的流程。
+- **Agent 可以零变量**：`variables=[]` 合法。新建 Agent 默认零变量；Agent 直聊时用户消息会追加到模板末尾，不会静默丢弃。_这是步骤 5 前取消的限制。_
+- **Flow v2 只有六类节点**：`start / agent / condition / loop / human / end`。`dslVersion=2`；旧 DSL 在 update / publish / validate / run 四个入口返回 `422 FLOW_DSL_LEGACY`。
+- **Agent 节点显式映射**：`{agentId, inputMap}`；`inputMap` 支持 `{{start.x}}`、`{{<nodeId>.output.field}}`、`{{<nodeId>.text}}`、`{{nodes.<nodeId>.output.field}}`。必填变量未映射会在运行前被 `FLOW_INVALID` 拦截并定位到节点。
+- **对话历史按作用域隔离**：`agentId + flowId + nodeId`；Agent 库直聊只有 `agentId`。每轮创建一条 `targetType=agent` 的 run。
+- **Run 统一目标**：`runs.targetType=flow|agent` + `targetId`；运行历史、回放、统计都按目标展示。
+- **旧 DSL 不迁移、不做前后兼容**：旧流程只用于回放；不备份、不自动迁移。
 
-首次准备（**只在一个干净的 `.venv` 上做一次**）：
+---
+
+## 环境与启动
+
+要求 Python 3.10+、Node.js 18+，后端 8000、前端 5173。
+
+首次准备：
 
 ```powershell
 cd agentflow-backend
-py -3.10 -m venv .venv          # 或 python -m venv .venv，用你 PATH 上的 3.10+
+py -3.10 -m venv .venv
 .venv\Scripts\python.exe -m pip install -r requirements.txt -r requirements-dev.txt
 
 cd ..\agentflow-frontend
 npm install
 ```
 
-> ⚠️ **不要在已有 `.venv` 上重复执行 `python -m venv .venv`**。它不会清空 `Lib\site-packages`，只会替换 `pyvenv.cfg` 和 `Scripts\python.exe`，结果就是「3.10 的解释器 + 之前 3.13 装的依赖」，一 import 就报错（典型是 `ImportError: cannot import name 'Self' from 'typing'`）。
-> 要换解释器版本，先 `Remove-Item -Recurse -Force .venv` 再重建，然后重装依赖。
-
----
-
-## 启动（两个终端）
-
-### 终端 1 · 后端 `http://localhost:8000`
+两个终端：
 
 ```powershell
 cd agentflow-backend
 .venv\Scripts\python.exe -m uvicorn app.main:app --reload --reload-dir app --port 8000
 ```
 
-- 健康检查：`http://localhost:8000/api/health` → `{"status":"ok","version":"1.1"}`
-- Swagger：`http://localhost:8000/docs`
-- 数据库：`agentflow-backend/data/agentflow.db`（首次启动自动建表，含 8 张表）
-- **`--reload-dir app` 别去掉**：默认 `--reload` 会监视整个后端目录（含 `.venv`、`data`），一旦 `.venv` 里有大量文件变动（重装依赖、删虚拟环境），reload 会卡死甚至留下僵尸进程占着 8000 端口。
-
-> macOS / Linux 把 `.venv\Scripts\python.exe` 换成 `.venv/bin/python`。
-
-### 终端 2 · 前端 `http://localhost:5173`
-
 ```powershell
 cd agentflow-frontend
 npm run dev
 ```
 
-打开 `http://localhost:5173`（`http://127.0.0.1:5173` 同样可用），会自动跳到 `/flows`。Vite 把 `/api` 代理到 `http://127.0.0.1:8000`，正常请求不经过跨域；后端同时放行 `localhost` / `127.0.0.1` 的回环来源，所以直接访问 8000 也不会被浏览器拦。**不要把后端地址写进前端代码**。
+健康检查：`GET http://localhost:8000/api/health` → `{"status":"ok","version":"1.1"}`。
 
-> 代理目标故意写 `127.0.0.1` 而不是 `localhost`：Windows 上 `localhost` 常先解析到 IPv6 `::1`，而 uvicorn 默认只监听 IPv4，会表现为「页面能开、接口一直转圈到超时」。`vite.config.ts` 里已加 `server.host: true`，让 5173 同时接受 IPv4/IPv6。
+> 不要在已有 `.venv` 上重跑 `python -m venv`，否则会把解释器换掉但保留旧依赖，典型报错 `ImportError: cannot import name 'Self' from 'typing'`。需要换版本时先删除 `.venv` 再重建。
 
-前端页面：
+---
 
-| 路由 | 页面 |
+## 页面
+
+| 路由 | 用途 |
 |---|---|
-| `/flows` | 流程列表（新建 / 复制 / 删除 / 导入导出 JSON） |
-| `/flows/:id` | 编辑器（左节点库 / 中画布 / 右配置面板 + 底部运行抽屉） |
-| `/flows/:id/chat` | 对话模式（会话列表 + 消息气泡；每轮消息在后台创建一次普通 run） |
-| `/runs` | 运行历史（按流程 / 状态筛选） |
-| `/runs/:id` | 运行回放（事件时序 + 节点耗时 + 审批卡） |
-| `/tools` | 工具管理（R3 已实装：注册/试跑/调用记录） |
-| `/knowledge` `/eval` | 知识库与评测（R5 / R6 实装） |
+| `/agents` | Agent 库：新建、编辑、对话、删除；卡片显示变量数与资源徽标 |
+| `/agents/:id` | Agent 编辑器：变量、system/template、资源导入、模型、输出契约 |
+| `/agents/:id/chat` | Agent 直聊或流程节点作用域对话；支持 `?flowId=&nodeId=` |
+| `/flows` | Flow 列表：新建、复制、删除、导入导出 |
+| `/flows/:id` | Flow v2 画布：六类节点、Agent 下拉与 inputMap、运行输入 |
+| `/runs` | 运行历史：按 Flow / Agent 目标筛选 |
+| `/runs/:id` | 回放：事件时序、节点耗时、审批卡 |
+| `/tools` `/mcp` `/knowledge` `/eval` | 工具、MCP、知识库、评测页 |
 
-全局弹层：右上「模型设置」——填 Base URL / 默认模型 / API Key，可测连通、可清空 Key。未配置时顶部有黄色提示，点运行会被后端 409 拦下并自动弹出该弹层。
-
----
-
-## 配置模型（R2 起必须做，否则含 `llm` 节点的流程会被 409 拦下）
-
-**推荐：界面里配**。启动后点右上角「模型设置」，填 Base URL / 默认模型 / API Key → 「测试连接」→ 保存。
-Key 只存后端数据库（`settings` 表），界面只回脱敏预览（`sk-a…3456`），优先级 **界面配置 > `.env` > 空**。
-
-| 场景 | Base URL | API Key | 模型 |
-|---|---|---|---|
-| OpenAI | `https://api.openai.com/v1` | `sk-...` | `gpt-4o-mini` |
-| DeepSeek | `https://api.deepseek.com/v1` | `sk-...` | `deepseek-chat` |
-| 本地假模型（无 Key 也能验流式） | `http://127.0.0.1:8899/v1` | 任意非空 | `fake-model` |
-
-本地假模型必须单独起一个进程（**只是开发桩，不配 Key 也不会自动降级到它**）：
-
-```powershell
-cd agentflow-backend
-.venv\Scripts\python.exe -m uvicorn tools.fake_llm:app --port 8899
-```
-
-也可以不用界面，直接写 `agentflow-backend/.env`（复制 `.env.example`）：
-
-```ini
-DATABASE_PATH=./data/agentflow.db
-LLM_BASE_URL=https://api.openai.com/v1
-LLM_API_KEY=
-LLM_DEFAULT_MODEL=gpt-4o-mini
-MAX_STEPS=8
-RUNNER=loop
-DEMO_STEP_DELAY=0.05
-CORS_ORIGINS=["http://localhost:5173","http://127.0.0.1:5173","http://localhost:8000","http://127.0.0.1:8000"]
-CORS_ORIGIN_REGEX=http://(localhost|127\.0\.0\.1)(:\d+)?
-```
-
-| 变量 | 作用 |
-|---|---|
-| `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_DEFAULT_MODEL` | 模型初始配置；界面上保存过之后就以界面为准 |
-| `MAX_STEPS` | **模型调用次数**上限（不是节点数），防模型被工具结果喂进无限循环 |
-| `RUNNER` | `loop` = 真调模型；`demo` = 确定性桩（不联网，用于回归） |
-| `DEMO_STEP_DELAY` | 节点间停顿（秒）。想验证「停止」按钮，设成 `0.5` 再启动 |
+模型设置：右上角填 Base URL / 默认模型 / API Key，Key 只存库并回脱敏预览；未配置时运行 Agent 流程会返回 409 `LLM_NOT_CONFIGURED`。
 
 ---
 
-## 执行引擎（R4）
+## API 速览
 
-默认 `RUNNER=graph`（LangGraph）。三个引擎共用同一套事件协议与节点执行逻辑，切换只影响「谁在编排」：
+**Agent**
 
-| RUNNER | 行为 |
-|---|---|
-| `graph` | LangGraph：条件边做互斥分支、环由 superstep 驱动、checkpointer 把暂停点落在真实执行位置。**默认** |
-| `loop` | R2 手写 Agent Loop，只能按拓扑序线性跑。留作对照/兜底，不支持条件分支与回边 |
-| `demo` | 确定性桩，不联网，回归用 |
+- `GET/POST /api/agents`
+- `GET/PUT/DELETE /api/agents/{id}`
+- `POST /api/agents/validate`、`POST /api/agents/{id}/validate`
+- `POST /api/agents/{id}/run`（同步调试）、`POST /api/agents/{id}/runs`（202 + SSE）
 
-**分支节点（condition）**：右侧两个锚点，绿=真、红=假；选中节点后配置面板的「分支连线」里可以核对/改归属，缺一边运行校验会拦下。表达式写成 `{{score}} > 0.8`（变量会按字面量替换，字符串不用自己加引号），只允许比较/布尔/四则/下标。
+**Flow**
 
-**循环节点（loop）**：右侧两个锚点，`body` 是循环体入口、`done` 是出口；`最大轮次` 数的是循环体跑几次，`退出条件` 为真时提前走 `done`（留空则只按轮次退出）。循环体跑完要把边连回 loop 节点；回边不算非法环。
+- `GET/POST /api/flows`、`GET/PUT/DELETE /api/flows/{id}`
+- `POST /api/flows/{id}/validate`、`publish`、`run`
+- `GET /api/node-types`：只返回六类节点 Schema
 
-**中断续跑（human）**：`human` 节点停下时会写 `runs.state` 与 LangGraph checkpoint，运行面板出现「批准并续跑」。续跑用 `aupdate_state` 把 state 灌回图、`ainvoke(None)` 从断点继续——**官方 `interrupt()` 在 Python 3.10 上不可用**（contextvar 进不去异步节点），见后端 README 说明。
+**Chat**
 
-**推理模型空回答**：`deepseek-flash` 实测先吐思维链（`reasoning_content`，token 帧里是 `reasoning`，节点完成事件里有 `reasoningChars`），预算被它吃满时正文就是空串（`run_78d8d9da` 把 `max_tokens=128` 用得一分不剩）。现在节点完成事件还带 `finishReason`，输出页按两种成因给不同警告：思维链吃满 / 撞 `Max tokens` 被截断；照着提示把上限调到 512 以上即可。
+- `POST/GET /api/chat/conversations`
+- `GET/DELETE /api/chat/conversations/{id}`
+- `POST /api/chat/conversations/{id}/turns`：202，返回 `runId`
 
----
+**Run**
 
-## 配置工具（R3）
-
-工具是**注册表**里的一等对象，节点只引用 id，行为（超时/重试/幂等）跟着工具走。
-
-1. 打开 `http://localhost:5173/tools` → 「新建工具」
-2. 不想折腾外部接口就先选**内置**：`echo`（原样回显）、`now`（当前时间）、`calc`（四则运算）。参数 Schema 由后端给，不用填
-3. 点「试跑」→ 「执行一次」看到成功/尝试次数/耗时；勾上「走幂等缓存」连点两次，第二次应显示**幂等命中、尝试 0**
-4. 在编辑器里二选一接进流程：
-   - 拖一个 **tool 节点** → 选工具 → 填参数模板（JSON，支持 `{{query}}` 插值）→ 这是「用户写死的固定调用」
-   - 拖一个 **llm 节点** → 「绑定工具」勾上 → 这是「模型自己决定调不调」，模型每追问一轮算一步，受 `MAX_STEPS` 限制
-5. 运行后在「实时日志」看 `tool_call`（`source: node|llm`）→ `tool_result`（`latencyMs / attempts / idemHit`），「工具管理」的「最近调用记录」里能按 runId 翻回去
-
-HTTP 工具的关键字段：`URL`（可含 `{{参数}}`）、`Headers`（JSON）、`Body 模板`（JSON，留空则把参数原样当 body）、`参数 Schema`（既做入参校验，也原样作为 `tools[].function.parameters` 给模型看）。
-
-失败口径：**tool 节点失败 → 整个 run 失败**（错误里有节点 id）；**llm 节点里的 FC 工具失败 → 错误回给模型**，让它自己改参数重试，run 继续。重试只对连接错误/超时/5xx，**4xx 不重试**。
-
----
-
-## 扩展能力（R5）
-
-三类新节点都能在任何流程里直接拖：**MCP**、**子流程（skill）**、**知识（knowledge）**；图引擎与手写 Loop 都支持。
-
-**MCP 服务页 `/mcp`**
-
-1. 注册一个 **stdio** MCP Server：填 `命令`（如 `.venv\Scripts\python.exe`）和 `参数`（JSON 数组，如 `["scripts\mcp_demo_server.py"]`），超时按秒。
-2. 点「探测工具」→ 后端起进程走 `initialize → tools/list`，列出工具名与参数 Schema；失败会回错误码（`MCP_SPAWN_FAILED` / `MCP_TIMEOUT` / `MCP_SERVER_EXITED` …），不会 500。
-3. 选一个工具、按 Schema 填参数 JSON → 「试跑」直接看到 `tools/call` 结果。仓库自带的 `scripts/mcp_demo_server.py` 有 `echo / add / now`，纯标准库，不联网。
-4. 编辑器里拖 **MCP 节点** → 配置面板是下拉：先选 Server，再选工具（探测过的 Server 才有工具下拉，失败可手填）→ 参数模板支持 `{{变量}}`。运行时日志出现 `tool_call(source:"mcp")` → `tool_result`。
-
-**知识库页 `/knowledge`**
-
-1. 新建知识库（chunkSize / overlap），加文档（标题 + 正文）。后端按句切块，长句带 overlap 硬切；`docCount / chunkCount` 实时回写。
-2. 召回测试：填 query、topK，可选 **MMR 重排**（零成本去冗余，不调模型）。结果给出分数、片段、耗时与 hint。
-3. 编辑器里拖 **知识节点** → 选知识库、写检索 Query（默认 `{{query}}`）→ 节点把命中片段拼成 `context`、引用写 `citations`，下游模板里用 `{{context}}` 引用；日志里出现青色 `knowledge_retrieved`。
-
-> 当前是 **BM25 关键词检索**：中文按字符 bigram、英文按词，不是向量检索。同义改写召回弱于原词命中，`embedding_model` 字段留给后续版本。
-
-**子流程（skill）**
-
-- 子流程节点选一个**已保存**的流程，填 `inputs_template`（JSON，支持 `{{变量}}`）。
-- 执行是**内联**的：子流程不建 run、不发事件、不写检查点；它的 `outputs` 合并回父变量，tokens/cost 累加进父 run，节点完成事件带 `skillFlow / skillFlowName / depth / tokens`。子流程内部完成的模型调用记在它自己的 `steps` 上，**不占父 run 的 8 步上限**（父子各自受 `MAX_STEPS` 约束）。
-- 限制：嵌套最多 3 层、不能指向自己（`SKILL_RECURSION`）、子流程里不能有 `human`（`SKILL_HUMAN_UNSUPPORTED`，父 run 接不了子流程的审批）。
-
----
-
-## 对话模式（R5.1）
-
-把一个**已保存的流程**当成一个 Agent，用聊天方式连续对话：每轮输入是一条用户消息，输出是这条流程完整跑一遍的结果，不需要改执行引擎。
-
-- **会话绑定流程**：一个会话属于一个流程（`conversations.flow_id`，删流程级联删会话）。左侧可建多个会话，标题默认取首条消息前 24 字。
-- **每轮就是一次普通 run**：`POST /api/chat/conversations/{id}/turns` 会构建 `history` → 创建 run（`runs.conversation_id` 关联）→ 写 `chat_turns` → 异步执行。助手回复**不单独落表**，读取时用 `chat_turns.run_id` 回查 `runs.outputs_json`，run 失败就显示错误与回放链接。
-- **历史从成功 run 里取**：按时间取最近 6 轮、最多 3000 字，超出丢最旧的，最后再做尾部硬切。拼成「用户: … / 助手: …」文本放进变量 `history`；本轮消息在 `query`。
-- **前端流式**：发送后订阅该 run 的 SSE，token 只追加到当前会话的气泡里（有局部缓冲，不写全局 `runStore`，多会话不会串流）；`run_completed/run_failed` 后以服务端会话为准重载。
-- **限制**：含 `human` 审批节点的流程不支持对话（409 `CHAT_HUMAN_UNSUPPORTED`，聊天页没有审批入口）；含 `llm` 节点但没配 Key 回 409 `LLM_NOT_CONFIGURED`。
-- **接口**：`POST/GET /api/chat/conversations`、`GET/DELETE /api/chat/conversations/{id}`、`POST /api/chat/conversations/{id}/turns`（202，返回 `runId`）。
-
-> 记忆目前是**硬截断**，不是长短期记忆：没有摘要、没有向量检索。后续可在 `chat_repo.build_history` 里替换为「滑动窗口 + 摘要 + 向量召回」，会话层接口不用动。
+- `GET /api/runs?target_type=&target_id=&flow_id=&agent_id=`
+- `GET /api/runs/{id}`、`GET /api/runs/{id}/stats`、`GET /api/runs/{id}/events`
+- `POST /api/runs/{id}/cancel`、`POST /api/runs/{id}/resume`
 
 ---
 
 ## 验证
 
 ```powershell
-# 后端：71 个用例。覆盖 Flow 版本语义/SSE 终态/取消/审批续跑、节点 Schema、Key 脱敏、MAX_STEPS、
-# 模型名不匹配的可读报错、并发保存乐观锁、工具 CRUD/重试/幂等/FC 回路、图引擎的条件分支/有界循环/检查点续跑、
-# 空回答诊断（思维链 vs length 截断）、MCP 探测/调用与失败码、知识库切块/检索/MMR、子流程合并与递归/深度拦截、
-# 对话两轮历史回灌与消息配对、会话按 flow_id 隔离、human 流程 409、空消息 422、删除会话 404
 cd agentflow-backend
 .venv\Scripts\python.exe -m pytest
+# 期望 60 passed
 
-# 前端：类型检查 + 生产构建
 cd ..\agentflow-frontend
-npm run typecheck
-npm run build
+node node_modules\typescript\bin\tsc --noEmit
+node node_modules\vite\bin\vite.js build
 ```
 
-逐轮手工验收步骤见 **[docs/acceptance.md](docs/acceptance.md)**：每轮都给出「打开哪个页面、点哪里、看到什么」的验收表，外加可直接复制的 PowerShell 接口命令。
+真实网关冒烟：
+
+```powershell
+cd agentflow-backend
+.venv\Scripts\python.exe scripts\seed_v2_demo.py --smoke
+```
+
+详细验收命令、浏览器检查表和已知限制见 `docs/acceptance.md`。
 
 ---
 
-## 故障排查
+## 已知限制
 
-| 现象 | 原因 / 处理 |
-|---|---|
-| 启动即 `ImportError: cannot import name 'Self' from 'typing'`（栈里是 `websockets`/`uvicorn`） | 解释器与依赖版本错配（多半是对旧 `.venv` 重跑了 `python -m venv`）。删掉 `.venv` 重建并重装依赖 |
-| 装完 langgraph 后 uvicorn 起不来 | pip 把 `websockets` 顶到了 16。补装 `pip install "websockets>=12,<13"`；pip 报 `langsmith requires websockets>=15` 的冲突可忽略（不用 LangSmith tracing） |
-| 一跑图就 `'Connection' object has no attribute 'is_alive'` | `aiosqlite` 升到了 0.22，checkpointer 2.x 依赖这个属性。降回 `pip install aiosqlite==0.21.0` |
-| 模型回答是空字符串，但 token 有消耗 | 推理模型把输出预算花在 `reasoning_content` 上（日志 token 帧里能看到 `reasoning`）。把该节点 Max tokens 调大到 512+，或换非推理模型；输出页会显示这条警告 |
-| `human` 节点点「批准并续跑」后报找不到检查点 | checkpoint 表被删或换了数据库文件。重跑一次该流程即可；续跑只对当前库里保存过的运行有效 |
-| `ModuleNotFoundError: No module named 'app'` | 没在 `agentflow-backend` 目录下启动 uvicorn |
-| 运行返回 409 `LLM_NOT_CONFIGURED` | 还没配模型。点右上「模型设置」填 Base URL / Key / 模型，或用 `.env` |
-| 运行 500 且 error 里是 `模型接口返回 4xx` | Base URL 少了 `/v1`、Key 无效、模型名不存在 |
-| 报错说「你传了 gpt-4o-mini，但网关只支持 X」 | **节点里写死了模型名**，节点级模型优先于系统设置。打开编辑器选中该「模型」节点，点红字「点此改为跟随系统默认」即可；新建流程默认已留空 |
-| 明明改好了、再运行又变回旧配置 | 是**旧标签页**把它覆盖回去了。现在 `PUT` 带 `baseUpdatedAt`，过期会被 409 `FLOW_STALE` 拒绝并自动重载；界面还显示旧值就按 `Ctrl+R` 刷新 |
-| 改了后端代码但行为没变 | `--reload` 在这台机器上偶发不生效（日志有 `Reloading` 但子进程没换），手动重启后端。R5 就踩过一次：`mcp_client.py` 已改成线程版，探针却仍报旧的 `NotImplementedError` |
-| MCP 探测报 `MCP_SPAWN_FAILED` | 命令不在 PATH 或路径写错。Windows 上建议直接填绝对路径（如 `E:\...\agentflow-backend\.venv\Scripts\python.exe`），参数用 JSON 数组 |
-| MCP 探测报 `MCP_TIMEOUT` | Server 起得来但不在超时内应答 `initialize`。先单独在终端跑 `python scripts\mcp_demo_server.py` 确认它不报错，再调大超时 |
-| MCP 探测报 `MCP_SERVER_EXITED` | 进程启动后立刻退出，错误里带它最后几行 stderr；多半是参数路径不对或脚本自己崩了 |
-| 知识库搜不到想要的 | 当前是 BM25 关键词检索，换个更贴近原文的说法；中文按字符 bigram，别用大段同义改写。也可能是 chunk 太大（一篇只切出 1 块），调小 chunkSize 重加文档 |
-| 子流程跑不起来 | 多半是 `SKILL_RECURSION`（指向自己）、`SKILL_DEPTH_EXCEEDED`（超过 3 层）或 `SKILL_HUMAN_UNSUPPORTED`（子流程含人工节点）；子流程改完要先保存，父流程跑的是**当前保存的 DSL** |
-| 前端页面能开但接口 502 / 一直转圈到超时 | ①后端没起或没监听 8000；②代理走了 `::1`（见上文说明） |
-| 8000 端口显示在监听、但所有请求都超时 | 僵死的 reloader 占着端口、子进程已挂。按命令行找出并杀掉：`Get-CimInstance Win32_Process -Filter "Name='python.exe'" \| Select ProcessId,CommandLine` |
-| 端口被占 | `Get-NetTCPConnection -LocalPort 8000` 查进程，`Stop-Process -Id <pid>` |
-| 运行没有流式 token | 正常：R1 的执行器是本地演示桩，不调模型。R2 接真实 LLM 后才有真 token |
-
----
-
-## 两端启动后的最小闭环（约 5 分钟）
-
-1. `http://localhost:5173/flows` → 右上「模型设置」→ 填 Base URL / Key / 模型 → 「测试连接」通过 → 保存。顶部黄色「未配置模型」消失。
-2. 右上「新建流程」→ 自动生成 `input → llm → output`。左侧节点库的 11 类节点由后端 Schema 下发，**全部已实装**（mcp / 子流程 / 知识不再带「占位」标）。
-3. 编辑器里改 System Prompt，停手约 1 秒 → 顶部 `v1` **不变**（草稿自动保存不动 version）；点「发布」→ 变 `v2`。
-4. 点「运行」→ 底部抽屉逐块滚出**真实模型**的 token（`node_completed` 里带 `usage`），顶部显示「模型调用 1/8」。
-5. 切「指标成本」→ Token 用量与节点表合计一致；点「刷新指标」拉 `GET /api/runs/:id/stats`。
-6. 打开「运行历史」→ 按流程筛选 → 点「回放」看到完整事件时序、节点耗时、终态不转圈。
-7. 想让审批卡出现：画一条 `input → human → output`，运行后状态变「等待审批」，点「批准并续跑」→ 变「成功」。
-8. 想让工具事件出现：`/tools` 新建内置 `echo` → 试跑一次 → 在流程里加 tool 节点选它（参数模板 `{"text":"{{query}}"}`），或在 llm 节点「绑定工具」里勾上它 → 运行时日志出现 `tool_call` / `tool_result`。
-9. 想让分支真的分叉：在「分支」节点右侧的**真/假锚点**分别拉线到两个下游节点，选中节点后在「分支连线」确认归属 → 运行一次，日志里只会看到一个分支的 `node_started`。
-10. 想让循环转起来：`input → 循环(body) → 模板 → 模型 → 回到循环`，循环节点 `done` 锚点连到出口 → 运行，日志里 `loop_1` 会按轮次重复出现，模型调用数等于轮次。
-11. 想让 MCP 出现：`/mcp` 注册 `scripts\mcp_demo_server.py`（命令填 venv 的 `python.exe`，参数填脚本绝对路径）→ 探测出 `echo/add/now` → 流程里 `input → MCP(now) → output(result)` → 运行，日志出现 `tool_call(source:"mcp")` 与 `latencyMs`。
-12. 想让知识库出现：`/knowledge` 新建库 → 加两段文档 → 召回测试填原词能命中 → 流程里 `input → 知识 → 模板(引用 {{context}}) → 模型 → output` → 运行，日志先出 `knowledge_retrieved`，回答能对上资料并带引用。
-13. 想让子流程出现：先保存一个 `input → 模板 → 模型 → output` 的小流程 → 父流程拖 **子流程节点** 选它、入参模板 `{"query":"{{query}}"}` → 运行，子流程不单独出现在运行历史，但父 run 的 `node_completed` 带 `skillFlow/depth/tokens`，token 已累加。
-
----
-
-## 技术栈
-
-前端 React 18 · TypeScript · Vite 6 · React Flow 12 · Zustand · Tailwind · RHF + Zod · fetch-event-source
-后端 Python 3.10+ · FastAPI · aiosqlite（SQLite + WAL）· sse-starlette · orjson · httpx（模型流式调用，不引 openai SDK）· LangGraph 0.2（图执行器 + SQLite checkpointer）<br>
-依赖版本说明：`uvicorn>=0.30,<0.35` + `websockets>=12,<13`。uvicorn 0.35+ 换用的 websockets-sansio 需要 `websockets>=14`，而它依赖 `typing.Self`（3.11+），在 3.10 上启动即崩，所以锁在这个区间；用 3.11+ 解释器时可以放开。`aiosqlite` 锁 `<0.22`：0.22 删掉了 `Connection.is_alive`，checkpointer 2.x 会直接 AttributeError。`pip install langgraph` 会顺手把 websockets 顶到 16，装完必须补 `pip install "websockets>=12,<13"`。
-
-## 路线图
-
-| 轮次 | 后端 | 前端 |
-|---|---|---|
-| **R1 ✅** | Flow CRUD + 版本语义、SSE、取消/续跑、测试基座 | 发布/问题面板、流式输出、指标、历史筛选、回放 |
-| **R2 ✅** | 节点 Schema 注册表、`/api/settings/llm`、OpenAI 兼容流式、手写 Agent Loop + `MAX_STEPS` 守卫 | 节点库/配置面板改吃后端 Schema、模型设置弹层、未配置拦截与引导、节点数 vs 模型调用数拆分 |
-| **R3 ✅** | 工具注册表（HTTP + 内置 echo/now/calc）、超时/重试/幂等、llm 节点真 Function Calling | 工具管理页（注册/试跑/调用记录）、tool 节点工具下拉、llm 节点「绑定工具」勾选 |
-| **R4 ✅** | LangGraph 图执行器：条件边、有界循环、checkpointer 中断续跑（替代手写循环，保留 loop 做对照） | 分支/循环节点的双出口锚点与「分支连线」下拉、顶栏引擎标识、空回答（思维链吃满预算）警告 |
-| **R5 ✅** | MCP stdio 客户端、知识库切块 + BM25/MMR、skill 子流程内联；三类节点在图/手写引擎都可用 | MCP 服务页（注册/探测/试跑）、知识库页（文档/召回）、配置面板三处引用选择器、`knowledge_retrieved` 事件 |
-| **R5.1 ✅** | 会话层：conversations/chat_turns、每轮创建 run、历史回灌（近 6 轮 / 3000 字） | 聊天页、流程列表/编辑器「对话」入口、SSE 气泡追加 |
-| R6 | 评测体系 + Docker | 评测页 |
+- `inputMap` 只校验路径可解析，不限制只能引用直接上游。
+- Agent 资源逐条添加，MCP 工具靠探测勾选，没有批量导入。
+- 运行历史不支持按名称搜索。
+- Agent 实时引用无版本锁；编辑 Agent 会立即影响所有引用流程。
+- 旧 DSL 只读回放，不支持编辑、发布、校验或运行。
+- Flow v2 暂不支持并行扇出；分支用 condition 的 true/false 互斥边。
+- 对话历史是近 6 轮 / 3000 字硬截断，不做摘要或向量记忆。

@@ -218,7 +218,7 @@ function AgentConfigField({ node }: { node: FlowNode }) {
             左列是 Agent 的变量，右列写流程表达式；产物可用 {"{{<nodeId>.output.<field>}}"} 取。
           </div>
           {agent.variables.length === 0 && (
-            <div className="text-[11px] text-warn">该 Agent 没有声明变量，调用时不会注入任何输入。</div>
+            <div className="text-[11px] text-ink-3">该 Agent 没有声明变量，调用时只使用固定提示词。</div>
           )}
           <div className="space-y-1.5">
             {agent.variables.map((variable) => (

@@ -102,6 +102,44 @@ async def test_chat_history_is_scoped_and_replayed(client, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_zero_variable_agent_chat_appends_message(client, monkeypatch):
+    """零变量 Agent 不再 422，本轮消息追加到固定提示词末尾。"""
+    seen: list[str] = []
+
+    async def stream(config, messages, **kwargs):
+        seen.append(messages[-1]["content"])
+        yield LLMDelta(text="固定 Agent 已回复", delta_tokens=2, cost=0.00001)
+
+    monkeypatch.setattr(agent_runner.llm, "stream_completion", stream)
+    response = await client.post(
+        "/api/agents",
+        json={
+            "name": "零变量",
+            "description": "固定提示词",
+            "variables": [],
+            "prompt": {"system": "你是固定角色", "template": "请保持角色设定。"},
+            "resources": [],
+            "model": {"name": "fake", "temperature": 0},
+            "output": {"description": "", "schema": None},
+        },
+    )
+    assert response.status_code == 201, response.text
+    agent = response.json()
+    conv = (
+        await client.post("/api/chat/conversations", json={"agentId": agent["id"]})
+    ).json()
+    turn = (
+        await client.post(
+            f"/api/chat/conversations/{conv['id']}/turns",
+            json={"content": "你好"},
+        )
+    )
+    assert turn.status_code == 202, turn.text
+    await wait_for_status(client, turn.json()["runId"], {"succeeded"})
+    assert seen[-1] == "请保持角色设定。\n\n用户消息：\n你好"
+
+
+@pytest.mark.asyncio
 async def test_flow_scoped_conversation_requires_agent_node(client):
     agent = await _agent(client, "节点")
     flow = await create_flow(

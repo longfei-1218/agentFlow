@@ -147,18 +147,16 @@ async def send_turn(conversation_id: str, payload: ChatTurnCreate):
         )
 
     chat_var = _chat_variable(agent)
-    if chat_var is None:
-        return JSONResponse(
-            status_code=422,
-            content={
-                "code": "AGENT_INPUT_MISSING",
-                "message": "Agent 没有可接收消息的字符串变量（建议定义 query）",
-                "detail": None,
-            },
-        )
-
     variables = dict(payload.variables)
-    variables[chat_var] = payload.content.strip()
+    chat_text: str | None = None
+    if chat_var is not None:
+        variables[chat_var] = payload.content.strip()
+        if f"{{{{{chat_var}}}}}" not in agent.prompt.template:
+            # 变量存在但模板没引用它，消息同样不能丢
+            chat_text = payload.content.strip()
+    else:
+        # 零变量 / 没有 string 变量的 Agent：把消息追加到模板末尾
+        chat_text = payload.content.strip()
     if any(var.key == "history" for var in agent.variables):
         variables["history"] = await build_history(conversation_id)
 
@@ -189,7 +187,9 @@ async def send_turn(conversation_id: str, payload: ChatTurnCreate):
         await touch_conversation(conversation_id, title=title or conversation.title)
 
     event_bus.seed_seq(run.id, await max_seq(run.id))
-    run_manager.launch(run.id, start_agent_run(run.id, agent, variables))
+    run_manager.launch(
+        run.id, start_agent_run(run.id, agent, variables, chat_text=chat_text)
+    )
     return ChatTurnResult(
         conversation_id=conversation_id,
         turn_id=turn_id,

@@ -440,7 +440,7 @@ export function AgentChatPage() {
                   每发一句话都会创建一次 Agent run。
                   {chatVar
                     ? `消息会填进 Agent 的 ${chatVar.key} 变量；`
-                    : "该 Agent 没有可接收消息的字符串变量；"}
+                    : "该 Agent 没有声明变量，消息会追加到提示词模板末尾；"}
                   {agent.variables.some((variable) => variable.key === "history") && " 历史会自动注入 history。"}
                 </div>
               </div>
@@ -487,12 +487,8 @@ export function AgentChatPage() {
                 className="field min-h-[46px] max-h-[140px] resize-y"
                 rows={2}
                 value={input}
-                disabled={sending || !chatVar}
-                placeholder={
-                  !chatVar
-                    ? "该 Agent 没有可接收消息的字符串变量，去编辑器加一个 query"
-                    : sending ? "上一轮还在运行…" : "输入消息，Enter 发送 / Shift+Enter 换行"
-                }
+                disabled={sending}
+                placeholder={sending ? "上一轮还在运行…" : "输入消息，Enter 发送 / Shift+Enter 换行"}
                 onChange={(event) => setInput(event.target.value)}
                 onCompositionStart={() => { composingRef.current = true; }}
                 onCompositionEnd={() => { composingRef.current = false; }}
@@ -503,7 +499,7 @@ export function AgentChatPage() {
                   }
                 }}
               />
-              <button className="btn-primary !py-2" disabled={sending || !input.trim() || !chatVar || missingRequired.length > 0} onClick={() => void send()}>
+              <button className="btn-primary !py-2" disabled={sending || !input.trim() || missingRequired.length > 0} onClick={() => void send()}>
                 <Send size={14} className="inline mr-1 -mt-0.5" />发送
               </button>
             </div>

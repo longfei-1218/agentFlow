@@ -178,6 +178,35 @@ async def test_human_pauses_and_resumes(client):
     assert final["outputs"]["query"] == "审批"
 
 
+@pytest.mark.asyncio
+async def test_zero_variable_agent_runs_in_flow(client, monkeypatch):
+    """零变量 Agent 不依赖 inputMap，按固定模板在流程节点里运行。"""
+    seen: list[str] = []
+    monkeypatch.setattr(agent_runner.llm, "stream_completion", _fake_stream(seen))
+    agent = await _agent(
+        client,
+        "固定",
+        "你是固定角色。",
+        [],
+        template="请保持角色设定。",
+    )
+    flow = await create_flow(
+        client,
+        [
+            node("start_1", "start", variables=[]),
+            node("a1", "agent", agentId=agent["id"], inputMap={}),
+            node("end_1", "end", outputs=[]),
+        ],
+        [edge("e1", "start_1", "a1"), edge("e2", "a1", "end_1")],
+    )
+    run = (
+        await client.post(f"/api/flows/{flow['id']}/run", json={"inputs": {}})
+    ).json()
+    final = await wait_for_status(client, run["id"], {"succeeded"})
+    assert final["outputs"]["text"] == "收到意图：请保持角色设定。"
+    assert seen[-1] == "请保持角色设定。"
+
+
 def test_legacy_flow_is_rejected():
     result = validate_flow(
         Flow(

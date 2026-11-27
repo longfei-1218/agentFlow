@@ -463,6 +463,7 @@ async def run_agent(
     llm_config: llm.LLMConfig | None = None,
     emit: EmitFn | None = None,
     stop: Callable[[], bool] | None = None,
+    chat_text: str | None = None,
 ) -> AgentRunResult:
     try:
         values = normalize_variables(agent, variables)
@@ -481,6 +482,10 @@ async def run_agent(
     prompt, bound, force_names, knowledge_calls = await _build_prompt_and_resources(
         agent, values, emit=emit
     )
+    # 零变量 Agent 的对话：消息没有可填的变量，直接追加到模板末尾，
+    # 否则固定提示词 Agent 在对话里会把用户这句话静默丢掉
+    if chat_text and chat_text.strip():
+        prompt = f"{prompt.rstrip()}\n\n用户消息：\n{chat_text.strip()}"
 
     messages: list[dict] = []
     if agent.prompt.system.strip():

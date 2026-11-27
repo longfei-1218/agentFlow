@@ -80,8 +80,8 @@ export function emptyAgentPayload(name = "新 Agent"): AgentPayload {
   return {
     name,
     description: "",
-    variables: [{ ...emptyVariable("query"), label: "用户输入" }],
-    prompt: { system: "你是一个简洁的中文助手。", template: "用户：{{query}}" },
+    variables: [],
+    prompt: { system: "你是一个简洁的中文助手。", template: "请根据下面的用户消息作答。" },
     resources: [],
     model: { name: "", temperature: 0.2, maxTokens: 1024, maxToolRounds: 4 },
     output: { description: "", schema: null },

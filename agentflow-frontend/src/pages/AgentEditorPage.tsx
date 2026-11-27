@@ -318,7 +318,7 @@ export function AgentEditorPage() {
                     </div>
                   </div>
                 ))}
-                {form.variables.length === 0 && <div className="text-[12px] text-warn">没有变量。聊天模式需要至少一个 string 变量（建议 query）。</div>}
+                {form.variables.length === 0 && <div className="text-[12px] text-ink-3">没有变量也可以保存：对话消息会追加到模板末尾。</div>}
               </div>
             </section>
 
