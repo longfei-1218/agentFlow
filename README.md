@@ -11,7 +11,9 @@
 ```text
 agentflow-backend/    FastAPI + SQLite + LangGraph
 agentflow-frontend/   React + TypeScript + Vite + React Flow
+PACKAGING.md          依赖锁定、打包产物与部署方式
 docs/
+  public-deployment-plan.md   公网部署（域名/备案/Nginx/预算）
   agent-refactor-plan.md    v2 最终实施记录与边界
   acceptance.md             v2 验收命令与检查表
   tool-mcp-extension-guide.md  新增工具 / MCP 与环境变量配置流程
@@ -40,7 +42,7 @@ docs/
 
 ## 环境与启动
 
-要求 Python 3.10+、Node.js 18+，后端 8000、前端 5173。
+要求 **Python 3.10.10**、**Node 22.23.2 / npm 10.9.8**（版本分别锁在 `.python-version`、`.nvmrc`），后端 8000、前端 5173。依赖与打包口径见 `PACKAGING.md`。
 
 首次准备：
 

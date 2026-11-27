@@ -6,3 +6,7 @@ agentflow-backend/data/resources/
 
 # 本地后端日志（全部忽略，包括 data/ 与 uvicorn 重定向日志）
 agentflow-backend/**/*.log
+
+# WorkBuddy 项目数据与学习材料（本地保留，不入库）
+.workbuddy/
+learning/

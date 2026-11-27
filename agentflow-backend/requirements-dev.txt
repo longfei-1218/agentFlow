@@ -1,6 +1,6 @@
 # 测试依赖（运行时不装，CI/本地开发用）
 -r requirements.txt
 
-pytest>=8.3,<9.0
-pytest-asyncio>=0.24,<1.0
-httpx>=0.28,<1.0
+pytest==8.4.2
+pytest-asyncio==0.26.0
+httpx==0.29.0
